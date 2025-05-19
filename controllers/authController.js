@@ -43,16 +43,24 @@ const register = async (req, res) => {
 
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { emailOrPseudo, password } = req.body;
 
-    const user = await User.findOne({ email: email });
+    // Search by mail address or pseudo
+    const user = await User.findOne({
+      $or: [{ email: emailOrPseudo }, { pseudo: emailOrPseudo }],
+    });
+
     if (!user) {
-      return res.status(400).json({ message: "Email or Password incorrect." });
+      return res
+        .status(400)
+        .json({ message: "Incorrect email, username or password." });
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
-      return res.status(400).json({ message: "Email or Password incorrect." });
+      return res
+        .status(400)
+        .json({ message: "Incorrect email, username or password." });
     }
 
     const token = jwt.sign(
