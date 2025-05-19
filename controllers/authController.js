@@ -96,8 +96,7 @@ const forgotPassword = async (req, res) => {
   try {
     const user = await User.findOne({ email });
     if (!user) return res.status(404).json({ message: "Email not found." });
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString(); // ex: 6 chiffres
+    const code = Math.floor(1000 + Math.random() * 9000).toString();
 
     await ResetCode.deleteMany({ email });
 
