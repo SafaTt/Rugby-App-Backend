@@ -65,7 +65,7 @@ const login = async (req, res) => {
 
     const token = jwt.sign(
       { userId: user._id, pseudo: user.pseudo },
-      "RUGBY_APP_SECRET_KEY"
+      process.env.JWT_SECRET
       // { expiresIn: "7d" }
     );
 
