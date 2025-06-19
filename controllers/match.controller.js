@@ -101,20 +101,27 @@ const updateMatchStatus = async (req, res) => {
 
 const findFirstPendingMatch = async (req, res) => {
   try {
-    // Recherche du premier match créé avec status 'pending'
-    const pendingMatch = await Match.findOne({ status: "waiting" }).sort({
-      createdAt: 1,
-    });
+    const { competition, duration } = req.body;
+
+    // Recherche d’un match en attente avec les mêmes critères
+    const pendingMatch = await Match.findOne({
+      status: "waiting",
+      competition,
+      duration,
+    }).sort({ createdAt: 1 });
 
     if (!pendingMatch) {
-      return res.status(404).json({ message: "Aucun match en attente trouvé" });
+      return res.status(404).json({
+        message: "Aucun match en attente trouvé avec ces critères",
+      });
     }
 
     res.status(200).json(pendingMatch);
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Erreur lors de la recherche du match", error });
+    res.status(500).json({
+      message: "Erreur lors de la recherche du match",
+      error,
+    });
   }
 };
 
