@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const dotenv = require("dotenv");
 const authRoutes = require("./routers/authRoutes");
 const matchRoutes = require("./routers/matchRoutes");
+const { startMatchCleaner } = require("./utils/matchCleaner");
 dotenv.config();
 console.log("JWT_SECRET:", process.env.JWT_SECRET);
 const app = express();
@@ -30,4 +31,6 @@ app.get("/", (req, res) => {
 // Start the server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
+  // Lancer le nettoyeur de matchs en attente
+  startMatchCleaner();
 });

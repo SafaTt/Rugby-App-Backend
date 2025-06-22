@@ -20,4 +20,13 @@ router.patch("/status/:id", auth, matchController.updateMatchStatus);
 
 router.post("/pending-first", auth, matchController.findFirstPendingMatch);
 
+router.post("/matches/clean", async (req, res) => {
+  try {
+    await matchController.cancelOldPendingMatches();
+    res.status(200).json({ message: "Old matches cleaned" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

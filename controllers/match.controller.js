@@ -144,6 +144,16 @@ const findFirstPendingMatch = async (req, res) => {
   }
 };
 
+const cancelOldPendingMatches = async () => {
+  const oneMinuteAgo = new Date(Date.now() - 30 * 1000);
+
+  const result = await Match.updateMany(
+    { status: "waiting", createdAt: { $lt: oneMinuteAgo } },
+    { status: "cancelled" }
+  );
+
+  console.log(`${result.modifiedCount} old matches cancelled`);
+};
 module.exports = {
   createMatch,
   joinMatch,
@@ -151,4 +161,5 @@ module.exports = {
   getWaitingMatches,
   updateMatchStatus,
   findFirstPendingMatch,
+  cancelOldPendingMatches,
 };
