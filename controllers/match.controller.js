@@ -22,7 +22,6 @@ const createMatch = async (req, res) => {
   }
 };
 
-// Rejoindre un match (joueur 2)
 const joinMatch = async (req, res) => {
   try {
     const matchId = req.params.id;
@@ -31,22 +30,42 @@ const joinMatch = async (req, res) => {
 
     const match = await Match.findById(matchId);
 
-    if (!match) return res.status(404).json({ message: "Match non trouvé" });
-
-    if (match.joinerId) {
-      return res.status(400).json({ message: "Ce match est déjà complet" });
+    // 1. Vérifier que le match existe
+    if (!match) {
+      return res.status(404).json({ message: "Match not found" });
     }
 
+    // 2. Vérifier que le match n’est pas déjà complet
+    if (match.joinerId) {
+      return res.status(400).json({ message: "This match is already full" });
+    }
+
+    // 3. Vérifier que l’équipe choisie est différente de celle du joueur 1
+    if (
+      match.playerOneTeam &&
+      match.playerOneTeam.title.toLowerCase() ===
+        playerTwoTeam.title.toLowerCase()
+    ) {
+      return res
+        .status(400)
+        .json({ message: "You cannot select the same team as Player One." });
+    }
+
+    // 4. Stocker l'équipe du joueur 2 et les autres infos
     match.playerTwoTeam = playerTwoTeam;
     match.joinerId = joinerId;
     match.status = "in-progress";
 
+    // 5. Sauvegarder le match mis à jour
     const updatedMatch = await match.save();
+
     res.status(200).json(updatedMatch);
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Erreur lors de la jointure du match", error });
+    console.error("Join Match Error:", error);
+    res.status(500).json({
+      message: "Error while joining the match",
+      error: error.message || error,
+    });
   }
 };
 

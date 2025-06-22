@@ -9,6 +9,7 @@ console.log("JWT_SECRET:", process.env.JWT_SECRET);
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(cors({ origin: "*" }));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/match", matchRoutes);

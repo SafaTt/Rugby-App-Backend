@@ -18,6 +18,6 @@ router.get("/allWaitingMatchs", auth, matchController.getWaitingMatches);
 // ✅ Mettre à jour le statut d’un match (optionnel)
 router.patch("/status/:id", auth, matchController.updateMatchStatus);
 
-router.get("/pending-first", auth, matchController.findFirstPendingMatch);
+router.post("/pending-first", auth, matchController.findFirstPendingMatch);
 
 module.exports = router;
