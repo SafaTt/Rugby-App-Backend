@@ -8,7 +8,7 @@ const startMatchCleaner = () => {
     } catch (error) {
       console.error("❌ Error cleaning old matches:", error.message);
     }
-  }, 30 * 1000); // 60 000 ms = 1 min
+  }, 50 * 1000); // 60 000 ms = 1 min
 };
 
 module.exports = { startMatchCleaner };

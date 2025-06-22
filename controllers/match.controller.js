@@ -145,7 +145,7 @@ const findFirstPendingMatch = async (req, res) => {
 };
 
 const cancelOldPendingMatches = async () => {
-  const oneMinuteAgo = new Date(Date.now() - 30 * 1000);
+  const oneMinuteAgo = new Date(Date.now() - 50 * 1000);
 
   const result = await Match.updateMany(
     { status: "waiting", createdAt: { $lt: oneMinuteAgo } },
