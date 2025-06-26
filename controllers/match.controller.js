@@ -6,6 +6,10 @@ const createMatch = async (req, res) => {
     const { competition, duration, playerOneTeam } = req.body;
     const creatorId = req.user._id;
 
+    if (!competition || !duration || !playerOneTeam) {
+      return res.status(400).json({ message: "Missing match data" });
+    }
+
     const newMatch = new Match({
       competition,
       duration,
@@ -14,11 +18,21 @@ const createMatch = async (req, res) => {
     });
 
     const savedMatch = await newMatch.save();
+
+    // ✅ Emit socket event ici si tu veux notifier les autres joueurs
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("new_match_created", { match: savedMatch });
+    }
+
     res.status(201).json(savedMatch);
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Erreur lors de la création du match", error });
+    console.error("❌ Error in createMatch:", error);
+
+    res.status(500).json({
+      message: "Erreur lors de la création du match",
+      error: error.message || error,
+    });
   }
 };
 
@@ -58,6 +72,11 @@ const joinMatch = async (req, res) => {
 
     // 5. Sauvegarder le match mis à jour
     const updatedMatch = await match.save();
+    // 🎯 Émettre un événement socket au joueur 1
+    req.io.emit("match_joined", {
+      matchId: updatedMatch._id,
+      match: updatedMatch,
+    });
 
     res.status(200).json(updatedMatch);
   } catch (error) {
