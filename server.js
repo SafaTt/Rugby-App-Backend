@@ -47,6 +47,11 @@ app.set("io", io);
 io.on("connection", (socket) => {
   console.log("✅ New client connected");
 
+  socket.on("join_match_room", (matchId) => {
+    socket.join(matchId);
+    console.log(`Socket ${socket.id} joined room ${matchId}`);
+  });
+
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected");
   });

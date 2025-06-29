@@ -73,12 +73,21 @@ const joinMatch = async (req, res) => {
 
     // 5. Sauvegarder le match mis à jour
     const updatedMatch = await match.save();
+
     // 🎯 Émettre un événement socket au joueur 1
-    req.io.emit("match_joined", {
-      matchId: updatedMatch._id,
-      startTime: match.startTime,
-      match: updatedMatch,
-    });
+    const io = req.app.get("io");
+
+    if (io) {
+      // Émettre à tous pour notifier joueur 1 que le match est rejoint
+      io.emit("match_joined", {
+        matchId: updatedMatch._id,
+        startTime: match.startTime,
+        match: updatedMatch,
+      });
+
+      // Émettre l'event quiz_start uniquement aux joueurs dans la room du match
+      io.to(match._id.toString()).emit("quiz_start", { matchId: match._id });
+    }
 
     res.status(200).json(updatedMatch);
   } catch (error) {
