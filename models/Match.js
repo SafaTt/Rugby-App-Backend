@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const QuestionAnsweredSchema = require("./QuestionAnswered");
 
 const teamSchema = new mongoose.Schema(
   {
@@ -43,6 +44,11 @@ const matchSchema = new mongoose.Schema(
       enum: ["waiting", "in-progress", "finished"],
       default: "waiting",
     },
+    startTime: {
+      type: Date,
+      default: null,
+    },
+    questionsAsked: [QuestionAnsweredSchema],
   },
   { timestamps: true }
 );

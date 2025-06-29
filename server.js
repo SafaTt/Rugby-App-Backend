@@ -8,7 +8,7 @@ const dotenv = require("dotenv");
 const authRoutes = require("./routers/authRoutes");
 const matchRoutes = require("./routers/matchRoutes");
 
-const { startMatchCleaner } = require("./utils/matchCleaner");
+// const { startMatchCleaner } = require("./utils/matchCleaner");
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -60,5 +60,5 @@ server.listen(1234, () => {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   // Lancer le nettoyeur de matchs en attente
-  startMatchCleaner();
+  // startMatchCleaner();
 });

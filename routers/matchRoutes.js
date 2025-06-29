@@ -29,4 +29,6 @@ router.post("/matches/clean", async (req, res) => {
   }
 });
 
+router.put("/:id/question", auth, matchController.updateMatchWithQuestion);
+
 module.exports = router;
