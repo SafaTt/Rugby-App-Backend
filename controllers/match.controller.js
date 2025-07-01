@@ -1,5 +1,20 @@
 const Match = require("../models/Match");
 const Quizz = require("../models/Quizz");
+
+const saveWithRetry = async (doc, retries = 3) => {
+  try {
+    await doc.save();
+  } catch (err) {
+    if (err.name === "VersionError" && retries > 0) {
+      const freshDoc = await Match.findById(doc._id);
+      Object.assign(doc, freshDoc.toObject());
+      await saveWithRetry(doc, retries - 1);
+    } else {
+      throw err;
+    }
+  }
+};
+
 // Créer un match (joueur 1)
 const createMatch = async (req, res) => {
   try {
@@ -255,78 +270,109 @@ const updateMatchWithQuestion = async (req, res) => {
         .json({ message: "Données de question incomplètes" });
     }
 
-    const match = await Match.findById(matchId);
-    if (!match) {
-      return res.status(404).json({ message: "Match introuvable" });
-    }
-
-    // Cherche si la question existe déjà
-    let questionIndex = match.questionsAsked.findIndex(
-      (q) => q.question.text === question.text
-    );
-
     const isCorrect = selectedOption === question.correctOption;
     const answeredAt = new Date();
 
-    const newAnswer = {
-      playerId: userId,
-      selectedOption,
-      isCorrect,
-      answeredAt,
-      score: 0,
-    };
+    // 1. Tenter de mettre à jour la réponse d'une question déjà existante
+    // - Empêcher double réponse via filtre
+    // - Ajouter la nouvelle réponse dans la question correspondante
 
-    if (questionIndex !== -1) {
-      const existingQuestion = match.questionsAsked[questionIndex];
+    const updateExisting = await Match.findOneAndUpdate(
+      {
+        _id: matchId,
+        "questionsAsked.question.text": question.text,
+        // Empêche que ce joueur ait déjà répondu
+        "questionsAsked.answers.playerId": { $ne: userId },
+      },
+      {
+        $push: {
+          "questionsAsked.$.answers": {
+            playerId: userId,
+            selectedOption,
+            isCorrect,
+            answeredAt,
+            score: 0, // on corrige score après
+          },
+        },
+      },
+      { new: true }
+    );
 
-      // Empêcher double réponse
-      const alreadyAnswered = existingQuestion.answers.find(
-        (a) => a.playerId.toString() === userId.toString()
+    if (updateExisting) {
+      // 2. Mettre à jour le score si c'est la première bonne réponse dans cette question
+      // Chercher la question mise à jour dans updateExisting
+      const q = updateExisting.questionsAsked.find(
+        (q) => q.question.text === question.text
       );
-      if (alreadyAnswered) {
-        return res
-          .status(400)
-          .json({ message: "Vous avez déjà répondu à cette question." });
-      }
 
-      // Ajouter la réponse
-      existingQuestion.answers.push(newAnswer);
-
-      // ⚠️ Vérifier s’il y a déjà une réponse correcte avec score = 4
-      const alreadyScored = existingQuestion.answers.find((a) => a.score === 4);
+      // Vérifier s'il y a déjà une réponse avec score=4
+      const alreadyScored = q.answers.some((a) => a.score === 4);
 
       if (isCorrect && !alreadyScored) {
-        // C’est la première bonne réponse → on score immédiatement
-        existingQuestion.answers[existingQuestion.answers.length - 1].score = 4;
+        // Mettre à jour la dernière réponse (celle qu'on vient d'ajouter) avec score=4
+        await Match.updateOne(
+          {
+            _id: matchId,
+            "questionsAsked.question.text": question.text,
+          },
+          {
+            $set: {
+              "questionsAsked.$[q].answers.$[a].score": 4,
+            },
+          },
+          {
+            arrayFilters: [
+              { "q.question.text": question.text },
+              { "a.playerId": userId, "a.answeredAt": answeredAt },
+            ],
+          }
+        );
       }
-
-      match.questionsAsked[questionIndex] = existingQuestion;
     } else {
-      // Première réponse à cette question
-      if (isCorrect) {
-        newAnswer.score = 4; // Score immédiat si le premier à répondre est correct
-      }
+      // 3. Sinon, question non encore posée -> création de la question + première réponse
+      let scoreToSet = 0;
+      if (isCorrect) scoreToSet = 4;
 
-      match.questionsAsked.push({
-        question,
-        answers: [newAnswer],
-      });
-    }
-    const alreadyAsked = match.questionsAsked.length;
-
-    if (alreadyAsked < Quizz.length) {
-      const next = Quizz[alreadyAsked];
-
-      match.questionsAsked.push({
-        question: {
-          text: next.question,
-          options: Object.values(next.choices),
-          correctOption: next.correctAnswer,
+      await Match.findByIdAndUpdate(
+        matchId,
+        {
+          $push: {
+            questionsAsked: {
+              question,
+              answers: [
+                {
+                  playerId: userId,
+                  selectedOption,
+                  isCorrect,
+                  answeredAt,
+                  score: scoreToSet,
+                },
+              ],
+            },
+          },
         },
-        answers: [],
-      });
+        { new: true }
+      );
+    }
 
-      await match.save();
+    // 4. Ajouter la prochaine question si besoin
+    const matchAfter = await Match.findById(matchId);
+
+    if (matchAfter.questionsAsked.length < Quizz.length) {
+      const next = Quizz[matchAfter.questionsAsked.length];
+
+      await Match.findByIdAndUpdate(matchId, {
+        $push: {
+          questionsAsked: {
+            question: {
+              text: next.question,
+              options: Object.values(next.choices),
+              correctOption: next.correctAnswer,
+            },
+            answers: [],
+          },
+        },
+      });
 
       const io = req.app.get("io");
       if (io) {
@@ -340,7 +386,7 @@ const updateMatchWithQuestion = async (req, res) => {
       }
     }
 
-    res.status(200).json({ message: "Réponse enregistrée", match });
+    res.status(200).json({ message: "Réponse enregistrée" });
   } catch (error) {
     console.error("Erreur updateMatchWithQuestion:", error);
     res.status(500).json({ message: "Erreur interne", error: error.message });

@@ -50,10 +50,9 @@ const matchSchema = new mongoose.Schema(
     },
     questionsAsked: [QuestionAnsweredSchema],
     quizStarted: {
-  type: Boolean,
-  default: false,
-},
-
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );
