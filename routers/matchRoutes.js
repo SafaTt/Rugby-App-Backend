@@ -30,5 +30,8 @@ router.post("/matches/clean", async (req, res) => {
 });
 
 router.put("/:id/question", auth, matchController.updateMatchWithQuestion);
+router.get("/calcul-score/:id", matchController.calculateScores);
+router.get("/quiz", matchController.getQuiz);
+router.get("/:id/next-question", matchController.getNextQuestion);
 
 module.exports = router;

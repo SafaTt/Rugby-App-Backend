@@ -1,5 +1,5 @@
 const Match = require("../models/Match");
-
+const Quizz = require("../models/Quizz");
 // Créer un match (joueur 1)
 const createMatch = async (req, res) => {
   try {
@@ -19,10 +19,40 @@ const createMatch = async (req, res) => {
 
     const savedMatch = await newMatch.save();
 
-    // ✅ Emit socket event ici si tu veux notifier les autres joueurs
     const io = req.app.get("io");
     if (io) {
+      // 🔔 Notifier tous les clients qu’un nouveau match est créé
       io.emit("new_match_created", { match: savedMatch });
+    }
+
+    // 🧠 Charger et envoyer la première question immédiatement
+    const firstQuestionIndex = 0;
+    const firstQuestion = Quizz[firstQuestionIndex];
+
+    if (firstQuestion) {
+      // Ajouter dans le match
+      savedMatch.questionsAsked.push({
+        question: {
+          text: firstQuestion.question,
+          options: Object.values(firstQuestion.choices),
+          correctOption: firstQuestion.correctAnswer,
+        },
+        answers: [],
+      });
+
+      await savedMatch.save();
+
+      // 🎯 Envoyer la première question via socket dans la room du match
+      if (io) {
+        io.to(savedMatch._id.toString()).emit("next_question", {
+          matchId: savedMatch._id,
+          question: {
+            text: firstQuestion.question,
+            choices: firstQuestion.choices,
+            correctAnswer: firstQuestion.correctAnswer,
+          },
+        });
+      }
     }
 
     res.status(201).json(savedMatch);
@@ -87,6 +117,27 @@ const joinMatch = async (req, res) => {
 
       // Émettre l'event quiz_start uniquement aux joueurs dans la room du match
       io.to(match._id.toString()).emit("quiz_start", { matchId: match._id });
+      // Charger et envoyer la première question
+      const firstQuestion = Quizz[0];
+
+      match.questionsAsked.push({
+        question: {
+          text: firstQuestion.question,
+          options: Object.values(firstQuestion.choices),
+          correctOption: firstQuestion.correctAnswer,
+        },
+        answers: [],
+      });
+
+      await match.save();
+
+      io.to(match._id.toString()).emit("next_question", {
+        question: {
+          text: firstQuestion.question,
+          choices: firstQuestion.choices,
+          correctAnswer: firstQuestion.correctAnswer,
+        },
+      });
     }
 
     res.status(200).json(updatedMatch);
@@ -261,12 +312,136 @@ const updateMatchWithQuestion = async (req, res) => {
         answers: [newAnswer],
       });
     }
+    const alreadyAsked = match.questionsAsked.length;
 
-    await match.save();
+    if (alreadyAsked < Quizz.length) {
+      const next = Quizz[alreadyAsked];
+
+      match.questionsAsked.push({
+        question: {
+          text: next.question,
+          options: Object.values(next.choices),
+          correctOption: next.correctAnswer,
+        },
+        answers: [],
+      });
+
+      await match.save();
+
+      const io = req.app.get("io");
+      if (io) {
+        io.to(matchId).emit("next_question", {
+          question: {
+            text: next.question,
+            choices: next.choices,
+            correctAnswer: next.correctAnswer,
+          },
+        });
+      }
+    }
+
     res.status(200).json({ message: "Réponse enregistrée", match });
   } catch (error) {
     console.error("Erreur updateMatchWithQuestion:", error);
     res.status(500).json({ message: "Erreur interne", error: error.message });
+  }
+};
+
+const calculateScores = async (req, res) => {
+  try {
+    const matchId = req.params.id;
+
+    const match = await Match.findById(matchId)
+      .populate("creatorId") // joueur 1
+      .populate("joinerId"); // joueur 2
+
+    if (!match) {
+      return res.status(404).json({ message: "Match introuvable" });
+    }
+
+    let scoreUserOne = 0;
+    let scoreUserTwo = 0;
+
+    // Parcours des questions et des réponses
+    if (Array.isArray(match.questionsAsked)) {
+      match.questionsAsked.forEach((q) => {
+        if (Array.isArray(q.answers)) {
+          q.answers.forEach((a) => {
+            if (a.playerId.toString() === match.creatorId._id.toString()) {
+              scoreUserOne += a.score || 0;
+            } else if (
+              match.joinerId &&
+              a.playerId.toString() === match.joinerId._id.toString()
+            ) {
+              scoreUserTwo += a.score || 0;
+            }
+          });
+        }
+      });
+    }
+
+    // Émission socket pour mise à jour en temps réel
+    const io = req.app.get("io");
+    if (io) {
+      io.to(matchId).emit("score_updated", {
+        matchId,
+        scoreUserOne,
+        scoreUserTwo,
+      });
+    }
+
+    return res.status(200).json({ scoreUserOne, scoreUserTwo });
+  } catch (error) {
+    console.error("Erreur dans calculateScores :", error);
+    return res
+      .status(500)
+      .json({ message: "Erreur serveur", error: error.message });
+  }
+};
+
+const getQuiz = async (req, res) => {
+  res.status(200).json(Quizz);
+};
+
+const getNextQuestion = async (req, res) => {
+  try {
+    const matchId = req.params.id;
+    const match = await Match.findById(matchId);
+
+    if (!match) {
+      return res.status(404).json({ message: "Match introuvable" });
+    }
+
+    const alreadyAsked = match.questionsAsked.length;
+    if (alreadyAsked >= Quizz.length) {
+      return res.status(200).json({ done: true });
+    }
+
+    const next = Quizz[alreadyAsked];
+
+    // Ajouter au match les questions posées
+    match.questionsAsked.push({
+      question: {
+        text: next.question,
+        options: Object.values(next.choices),
+        correctOption: next.correctAnswer,
+      },
+      answers: [], // personne n’a encore répondu
+    });
+
+    await match.save();
+
+    return res.status(200).json({
+      index: alreadyAsked,
+      question: {
+        text: next.question,
+        choices: next.choices,
+        correctAnswer: next.correctAnswer,
+      },
+    });
+  } catch (error) {
+    console.error("Erreur getNextQuestion:", error);
+    return res.status(500).json({ message: "Erreur serveur" });
   }
 };
 
@@ -279,4 +454,7 @@ module.exports = {
   findFirstPendingMatch,
   cancelOldPendingMatches,
   updateMatchWithQuestion,
+  calculateScores,
+  getQuiz,
+  getNextQuestion,
 };
