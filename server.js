@@ -7,6 +7,8 @@ const http = require("http");
 const dotenv = require("dotenv");
 const authRoutes = require("./routers/authRoutes");
 const matchRoutes = require("./routers/matchRoutes");
+const Match = require("./models/Match");
+const Quizz = require("./models/Quizz");
 
 // const { startMatchCleaner } = require("./utils/matchCleaner");
 dotenv.config();
@@ -50,6 +52,89 @@ io.on("connection", (socket) => {
   socket.on("join_match_room", (matchId) => {
     socket.join(matchId);
     console.log(`Socket ${socket.id} joined room ${matchId}`);
+  });
+
+  socket.on("match_joined", async (data) => {
+    const matchId = data.match._id;
+
+    const match = await Match.findById(matchId);
+    if (!match) {
+      console.log("❌ Match introuvable");
+      return;
+    }
+
+    // Vérifie si les deux joueurs sont présents
+    if (match.playerOneTeam && match.playerTwoTeam) {
+      console.log("🎮 Les deux joueurs sont connectés, démarrage du quiz !");
+      io.to(matchId.toString()).emit("quiz_start", { matchId });
+    } else {
+      console.log("🕒 Attente du second joueur...");
+    }
+  });
+
+  socket.on("quiz_start", async ({ matchId }) => {
+    setTimeout(() => {
+      console.log("🔥 Quizz loaded au démarrage :", Quizz.length);
+    }, 2000);
+
+    let match = await Match.findById(matchId);
+    if (!match) {
+      console.log("no match");
+      return;
+    }
+
+    // Si aucune question n'est encore ajoutée, ajouter la première
+    if (!match.questionsAsked || match.questionsAsked.length === 0) {
+      const first = Quizz[0];
+      console.log("👉 Première question récupérée :", first);
+
+      if (!first) {
+        console.log("pas de question");
+        return;
+      }
+      match.questionsAsked.push({
+        question: {
+          text: first.question,
+          options: Object.values(first.choices),
+          correctOption: first.correctAnswer,
+        },
+        answers: [],
+      });
+
+      await match.save();
+    }
+
+    // Recharger pour être sûr d’avoir la question sauvegardée
+    match = await Match.findById(matchId);
+
+    const firstQuestion = match.questionsAsked[0];
+    if (!firstQuestion) return;
+
+    io.to(matchId).emit("quiz_start", { matchId });
+    io.to(matchId).emit("next_question", {
+      question: {
+        text: firstQuestion.question.text,
+        choices: firstQuestion.question.options,
+        correctAnswer: firstQuestion.question.correctOption,
+      },
+    });
+  });
+
+  socket.on("request_current_question", async ({ matchId }) => {
+    const match = await Match.findById(matchId);
+    if (!match || !match.questionsAsked || match.questionsAsked.length === 0)
+      return;
+
+    const currentQuestion =
+      match.questionsAsked[match.questionsAsked.length - 1];
+
+    socket.emit("next_question", {
+      question: {
+        text: currentQuestion.question.text,
+        choices: currentQuestion.question.options,
+        correctAnswer: currentQuestion.question.correctOption,
+      },
+    });
   });
 
   socket.on("disconnect", () => {

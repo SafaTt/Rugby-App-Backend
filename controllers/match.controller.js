@@ -1,20 +1,6 @@
 const Match = require("../models/Match");
 const Quizz = require("../models/Quizz");
 
-const saveWithRetry = async (doc, retries = 3) => {
-  try {
-    await doc.save();
-  } catch (err) {
-    if (err.name === "VersionError" && retries > 0) {
-      const freshDoc = await Match.findById(doc._id);
-      Object.assign(doc, freshDoc.toObject());
-      await saveWithRetry(doc, retries - 1);
-    } else {
-      throw err;
-    }
-  }
-};
-
 // Créer un match (joueur 1)
 const createMatch = async (req, res) => {
   try {
@@ -31,43 +17,22 @@ const createMatch = async (req, res) => {
       playerOneTeam,
       creatorId,
     });
+    newMatch.questionsAsked = [
+      {
+        question: {
+          text: Quizz[0].question,
+          options: Object.values(Quizz[0].choices),
+          correctOption: Quizz[0].correctAnswer,
+        },
+        answers: [],
+      },
+    ];
 
     const savedMatch = await newMatch.save();
 
     const io = req.app.get("io");
     if (io) {
-      // 🔔 Notifier tous les clients qu’un nouveau match est créé
       io.emit("new_match_created", { match: savedMatch });
-    }
-
-    // 🧠 Charger et envoyer la première question immédiatement
-    const firstQuestionIndex = 0;
-    const firstQuestion = Quizz[firstQuestionIndex];
-
-    if (firstQuestion) {
-      // Ajouter dans le match
-      savedMatch.questionsAsked.push({
-        question: {
-          text: firstQuestion.question,
-          options: Object.values(firstQuestion.choices),
-          correctOption: firstQuestion.correctAnswer,
-        },
-        answers: [],
-      });
-
-      await savedMatch.save();
-
-      // 🎯 Envoyer la première question via socket dans la room du match
-      if (io) {
-        io.to(savedMatch._id.toString()).emit("next_question", {
-          matchId: savedMatch._id,
-          question: {
-            text: firstQuestion.question,
-            choices: firstQuestion.choices,
-            correctAnswer: firstQuestion.correctAnswer,
-          },
-        });
-      }
     }
 
     res.status(201).json(savedMatch);
@@ -89,17 +54,10 @@ const joinMatch = async (req, res) => {
 
     const match = await Match.findById(matchId);
 
-    // 1. Vérifier que le match existe
-    if (!match) {
-      return res.status(404).json({ message: "Match not found" });
-    }
-
-    // 2. Vérifier que le match n’est pas déjà complet
-    if (match.joinerId) {
+    if (!match) return res.status(404).json({ message: "Match not found" });
+    if (match.joinerId)
       return res.status(400).json({ message: "This match is already full" });
-    }
 
-    // 3. Vérifier que l’équipe choisie est différente de celle du joueur 1
     if (
       match.playerOneTeam &&
       match.playerOneTeam.title.toLowerCase() ===
@@ -110,48 +68,19 @@ const joinMatch = async (req, res) => {
         .json({ message: "You cannot select the same team as Player One." });
     }
 
-    // 4. Stocker l'équipe du joueur 2 et les autres infos
     match.playerTwoTeam = playerTwoTeam;
     match.joinerId = joinerId;
     match.status = "in-progress";
     match.startTime = new Date();
 
-    // 5. Sauvegarder le match mis à jour
     const updatedMatch = await match.save();
 
-    // 🎯 Émettre un événement socket au joueur 1
     const io = req.app.get("io");
-
     if (io) {
-      // Émettre à tous pour notifier joueur 1 que le match est rejoint
+      // Notifier que le joueur 2 a rejoint
       io.emit("match_joined", {
         matchId: updatedMatch._id,
-        startTime: match.startTime,
         match: updatedMatch,
-      });
-
-      // Émettre l'event quiz_start uniquement aux joueurs dans la room du match
-      io.to(match._id.toString()).emit("quiz_start", { matchId: match._id });
-      // Charger et envoyer la première question
-      const firstQuestion = Quizz[0];
-
-      match.questionsAsked.push({
-        question: {
-          text: firstQuestion.question,
-          options: Object.values(firstQuestion.choices),
-          correctOption: firstQuestion.correctAnswer,
-        },
-        answers: [],
-      });
-
-      await match.save();
-
-      io.to(match._id.toString()).emit("next_question", {
-        question: {
-          text: firstQuestion.question,
-          choices: firstQuestion.choices,
-          correctAnswer: firstQuestion.correctAnswer,
-        },
       });
     }
 
@@ -272,10 +201,6 @@ const updateMatchWithQuestion = async (req, res) => {
 
     const isCorrect = selectedOption === question.correctOption;
     const answeredAt = new Date();
-
-    // 1. Tenter de mettre à jour la réponse d'une question déjà existante
-    // - Empêcher double réponse via filtre
-    // - Ajouter la nouvelle réponse dans la question correspondante
 
     const updateExisting = await Match.findOneAndUpdate(
       {
