@@ -5,9 +5,14 @@ const QuestionAnsweredSchema = new mongoose.Schema(
   {
     question: {
       text: { type: String, required: true },
-      options: [{ type: String, required: true }],
+      options: {
+        type: Map,
+        of: String,
+        required: true,
+      },
       correctOption: { type: String, required: true },
     },
+
     answers: [
       {
         playerId: {

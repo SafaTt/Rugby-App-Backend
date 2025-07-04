@@ -1,7 +1,6 @@
 const Match = require("../models/Match");
 const Quizz = require("../models/Quizz");
 
-// Créer un match (joueur 1)
 const createMatch = async (req, res) => {
   try {
     const { competition, duration, playerOneTeam } = req.body;
@@ -16,17 +15,8 @@ const createMatch = async (req, res) => {
       duration,
       playerOneTeam,
       creatorId,
+      questionsAsked: [], // explicitement vide au départ
     });
-    newMatch.questionsAsked = [
-      {
-        question: {
-          text: Quizz[0].question,
-          options: Object.values(Quizz[0].choices),
-          correctOption: Quizz[0].correctAnswer,
-        },
-        answers: [],
-      },
-    ];
 
     const savedMatch = await newMatch.save();
 
@@ -191,7 +181,7 @@ const updateMatchWithQuestion = async (req, res) => {
     if (
       !question ||
       !question.text ||
-      !question.options ||
+      !question.options || // ici options doit être un objet Map (ex: {A: '...', B: '...'})
       !question.correctOption
     ) {
       return res
@@ -224,17 +214,13 @@ const updateMatchWithQuestion = async (req, res) => {
     );
 
     if (updateExisting) {
-      // 2. Mettre à jour le score si c'est la première bonne réponse dans cette question
-      // Chercher la question mise à jour dans updateExisting
       const q = updateExisting.questionsAsked.find(
         (q) => q.question.text === question.text
       );
 
-      // Vérifier s'il y a déjà une réponse avec score=4
       const alreadyScored = q.answers.some((a) => a.score === 4);
 
       if (isCorrect && !alreadyScored) {
-        // Mettre à jour la dernière réponse (celle qu'on vient d'ajouter) avec score=4
         await Match.updateOne(
           {
             _id: matchId,
@@ -254,23 +240,24 @@ const updateMatchWithQuestion = async (req, res) => {
         );
       }
     } else {
-      // 3. Sinon, question non encore posée -> création de la question + première réponse
-      let scoreToSet = 0;
-      if (isCorrect) scoreToSet = 4;
-
+      // Ici, on doit s'assurer que question.options est un objet (Map)
       await Match.findByIdAndUpdate(
         matchId,
         {
           $push: {
             questionsAsked: {
-              question,
+              question: {
+                text: question.text,
+                options: question.options, // <-- pas de Object.values ici
+                correctOption: question.correctOption,
+              },
               answers: [
                 {
                   playerId: userId,
                   selectedOption,
                   isCorrect,
                   answeredAt,
-                  score: scoreToSet,
+                  score: isCorrect ? 4 : 0,
                 },
               ],
             },
@@ -278,37 +265,6 @@ const updateMatchWithQuestion = async (req, res) => {
         },
         { new: true }
       );
-    }
-
-    // 4. Ajouter la prochaine question si besoin
-    const matchAfter = await Match.findById(matchId);
-
-    if (matchAfter.questionsAsked.length < Quizz.length) {
-      const next = Quizz[matchAfter.questionsAsked.length];
-
-      await Match.findByIdAndUpdate(matchId, {
-        $push: {
-          questionsAsked: {
-            question: {
-              text: next.question,
-              options: Object.values(next.choices),
-              correctOption: next.correctAnswer,
-            },
-            answers: [],
-          },
-        },
-      });
-
-      const io = req.app.get("io");
-      if (io) {
-        io.to(matchId).emit("next_question", {
-          question: {
-            text: next.question,
-            choices: next.choices,
-            correctAnswer: next.correctAnswer,
-          },
-        });
-      }
     }
 
     res.status(200).json({ message: "Réponse enregistrée" });
@@ -390,17 +346,7 @@ const getNextQuestion = async (req, res) => {
 
     const next = Quizz[alreadyAsked];
 
-    // Ajouter au match les questions posées
-    match.questionsAsked.push({
-      question: {
-        text: next.question,
-        options: Object.values(next.choices),
-        correctOption: next.correctAnswer,
-      },
-      answers: [], // personne n’a encore répondu
-    });
-
-    await match.save();
+ 
 
     return res.status(200).json({
       index: alreadyAsked,

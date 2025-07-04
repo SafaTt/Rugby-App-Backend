@@ -56,46 +56,73 @@ io.on("connection", (socket) => {
 
   socket.on("match_joined", async (data) => {
     const matchId = data.match._id;
+    let match = await Match.findById(matchId);
+    if (!match) return;
 
-    const match = await Match.findById(matchId);
-    if (!match) {
-      console.log("❌ Match introuvable");
-      return;
-    }
-
-    // Vérifie si les deux joueurs sont présents
     if (match.playerOneTeam && match.playerTwoTeam) {
-      console.log("🎮 Les deux joueurs sont connectés, démarrage du quiz !");
-      io.to(matchId.toString()).emit("quiz_start", { matchId });
-    } else {
-      console.log("🕒 Attente du second joueur...");
+      console.log("🎮 Deux joueurs présents, démarrage du quiz");
+
+      // ⚡️ Démarre immédiatement le quiz ici
+      if (!match.questionsAsked || match.questionsAsked.length === 0) {
+        const first = Quizz[0];
+        if (!first) return;
+
+        const formattedOptions = Array.isArray(first.choices)
+          ? first.choices.reduce((acc, choice, idx) => {
+              const letters = ["A", "B", "C", "D"];
+              acc[letters[idx]] = choice;
+              return acc;
+            }, {})
+          : first.choices;
+
+        match.questionsAsked.push({
+          question: {
+            text: first.question,
+            options: formattedOptions,
+            correctOption: first.correctAnswer,
+          },
+          answers: [],
+        });
+
+        await match.save();
+        match = await Match.findById(matchId);
+      }
+
+      const firstQuestion = match.questionsAsked[0];
+      if (!firstQuestion) return;
+
+      io.to(matchId).emit("quiz_start", { matchId });
+      io.to(matchId).emit("next_question", {
+        question: {
+          text: firstQuestion.question.text,
+          choices: firstQuestion.question.options,
+          correctAnswer: firstQuestion.question.correctOption,
+        },
+      });
     }
   });
 
+  // Quand serveur reçoit 'quiz_start', il envoie la 1ère question
   socket.on("quiz_start", async ({ matchId }) => {
-    setTimeout(() => {
-      console.log("🔥 Quizz loaded au démarrage :", Quizz.length);
-    }, 2000);
-
     let match = await Match.findById(matchId);
-    if (!match) {
-      console.log("no match");
-      return;
-    }
+    if (!match) return;
 
-    // Si aucune question n'est encore ajoutée, ajouter la première
     if (!match.questionsAsked || match.questionsAsked.length === 0) {
       const first = Quizz[0];
-      console.log("👉 Première question récupérée :", first);
+      if (!first) return;
 
-      if (!first) {
-        console.log("pas de question");
-        return;
-      }
+      const formattedOptions = Array.isArray(first.choices)
+        ? first.choices.reduce((acc, choice, idx) => {
+            const letters = ["A", "B", "C", "D"];
+            acc[letters[idx]] = choice;
+            return acc;
+          }, {})
+        : first.choices;
+
       match.questionsAsked.push({
         question: {
           text: first.question,
-          options: Object.values(first.choices),
+          options: formattedOptions,
           correctOption: first.correctAnswer,
         },
         answers: [],
@@ -104,13 +131,14 @@ io.on("connection", (socket) => {
       await match.save();
     }
 
-    // Recharger pour être sûr d’avoir la question sauvegardée
+    // Récupère la 1ère question dans la DB
     match = await Match.findById(matchId);
-
     const firstQuestion = match.questionsAsked[0];
     if (!firstQuestion) return;
 
-    io.to(matchId).emit("quiz_start", { matchId });
+    // N'EMETS PAS 'quiz_start' ici à nouveau (sinon boucle)
+
+    // Envoie la question aux joueurs dans la room
     io.to(matchId).emit("next_question", {
       question: {
         text: firstQuestion.question.text,
@@ -121,6 +149,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("request_current_question", async ({ matchId }) => {
+    console.log("📥 request_current_question reçu pour matchId:", matchId);
     const match = await Match.findById(matchId);
     if (!match || !match.questionsAsked || match.questionsAsked.length === 0)
       return;
@@ -128,7 +157,8 @@ io.on("connection", (socket) => {
     const currentQuestion =
       match.questionsAsked[match.questionsAsked.length - 1];
 
-    socket.emit("next_question", {
+    // ✅ CHANGER CECI
+    io.to(matchId).emit("next_question", {
       question: {
         text: currentQuestion.question.text,
         choices: currentQuestion.question.options,
