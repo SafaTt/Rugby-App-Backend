@@ -175,13 +175,12 @@ const updateMatchWithQuestion = async (req, res) => {
   try {
     const matchId = req.params.id;
     const userId = req.user._id;
-
     const { question, selectedOption } = req.body;
 
     if (
       !question ||
       !question.text ||
-      !question.options || // ici options doit être un objet Map (ex: {A: '...', B: '...'})
+      !question.options ||
       !question.correctOption
     ) {
       return res
@@ -192,63 +191,22 @@ const updateMatchWithQuestion = async (req, res) => {
     const isCorrect = selectedOption === question.correctOption;
     const answeredAt = new Date();
 
-    const updateExisting = await Match.findOneAndUpdate(
-      {
-        _id: matchId,
-        "questionsAsked.question.text": question.text,
-        // Empêche que ce joueur ait déjà répondu
-        "questionsAsked.answers.playerId": { $ne: userId },
-      },
-      {
-        $push: {
-          "questionsAsked.$.answers": {
-            playerId: userId,
-            selectedOption,
-            isCorrect,
-            answeredAt,
-            score: 0, // on corrige score après
-          },
-        },
-      },
-      { new: true }
-    );
+    // 1. Vérifie si la question existe déjà dans le match
+    let match = await Match.findOne({
+      _id: matchId,
+      "questionsAsked.question.text": question.text,
+    });
 
-    if (updateExisting) {
-      const q = updateExisting.questionsAsked.find(
-        (q) => q.question.text === question.text
-      );
-
-      const alreadyScored = q.answers.some((a) => a.score === 4);
-
-      if (isCorrect && !alreadyScored) {
-        await Match.updateOne(
-          {
-            _id: matchId,
-            "questionsAsked.question.text": question.text,
-          },
-          {
-            $set: {
-              "questionsAsked.$[q].answers.$[a].score": 4,
-            },
-          },
-          {
-            arrayFilters: [
-              { "q.question.text": question.text },
-              { "a.playerId": userId, "a.answeredAt": answeredAt },
-            ],
-          }
-        );
-      }
-    } else {
-      // Ici, on doit s'assurer que question.options est un objet (Map)
-      await Match.findByIdAndUpdate(
+    if (!match) {
+      // Si la question n'existe pas, on l'ajoute avec cette réponse
+      match = await Match.findByIdAndUpdate(
         matchId,
         {
           $push: {
             questionsAsked: {
               question: {
                 text: question.text,
-                options: question.options, // <-- pas de Object.values ici
+                options: question.options,
                 correctOption: question.correctOption,
               },
               answers: [
@@ -265,12 +223,134 @@ const updateMatchWithQuestion = async (req, res) => {
         },
         { new: true }
       );
+      return res
+        .status(200)
+        .json({ message: "Réponse enregistrée (nouvelle question)" });
     }
 
-    res.status(200).json({ message: "Réponse enregistrée" });
+    const qIndex = match.questionsAsked.findIndex(
+      (q) => q.question.text === question.text
+    );
+
+    if (qIndex === -1) {
+      return res.status(404).json({ message: "Question introuvable" });
+    }
+
+    const answers = match.questionsAsked[qIndex].answers;
+    const alreadyAnswered = answers.some(
+      (a) => a.playerId.toString() === userId.toString()
+    );
+
+    if (alreadyAnswered) {
+      return res
+        .status(400)
+        .json({ message: "Vous avez déjà répondu à cette question" });
+    }
+
+    // Ajoute la réponse du joueur
+    await Match.updateOne(
+      {
+        _id: matchId,
+        "questionsAsked.question.text": question.text,
+      },
+      {
+        $push: {
+          "questionsAsked.$.answers": {
+            playerId: userId,
+            selectedOption,
+            isCorrect,
+            answeredAt,
+            score: 0,
+          },
+        },
+      }
+    );
+
+    // Attribue le score au plus rapide (si bonne réponse)
+    const correctAnswers = match.questionsAsked[qIndex].answers
+      .filter((a) => a.isCorrect)
+      .sort((a, b) => new Date(a.answeredAt) - new Date(b.answeredAt));
+
+    if (correctAnswers.length > 0) {
+      const fastest = correctAnswers[0];
+      if (fastest.score !== 4) {
+        await Match.updateOne(
+          {
+            _id: matchId,
+            "questionsAsked.question.text": question.text,
+            "questionsAsked.answers.playerId": fastest.playerId,
+          },
+          {
+            $set: {
+              "questionsAsked.$[q].answers.$[a].score": 4,
+            },
+          },
+          {
+            arrayFilters: [
+              { "q.question.text": question.text },
+              { "a.playerId": fastest.playerId },
+            ],
+          }
+        );
+      }
+    }
+
+    // == ✅ LOGIQUE SOCKET POUR PROCHAINE QUESTION ==
+
+    const updatedMatch = await Match.findById(matchId);
+    const currentQ = updatedMatch.questionsAsked[qIndex];
+
+    // Si les deux joueurs ont répondu, passer à la suivante
+    if (currentQ.answers.length >= 2) {
+      const nextIndex = updatedMatch.questionsAsked.length;
+
+      // Vérifie s’il reste des questions
+      if (nextIndex < Quizz.length) {
+        const nextQ = Quizz[nextIndex];
+
+        const formattedOptions = Array.isArray(nextQ.choices)
+          ? nextQ.choices.reduce((acc, choice, idx) => {
+              const letters = ["A", "B", "C", "D"];
+              acc[letters[idx]] = choice;
+              return acc;
+            }, {})
+          : nextQ.choices;
+
+        updatedMatch.questionsAsked.push({
+          question: {
+            text: nextQ.question,
+            options: formattedOptions,
+            correctOption: nextQ.correctAnswer,
+          },
+          answers: [],
+        });
+
+        await updatedMatch.save();
+
+        // 🔥 Émettre la prochaine question via socket
+        const io = req.app.get("io"); // injecté depuis server.js
+        io.to(matchId.toString()).emit("next_question", {
+          question: {
+            text: nextQ.question,
+            choices: formattedOptions,
+            correctAnswer: nextQ.correctAnswer,
+          },
+        });
+      } else {
+        // ✅ Fin du quiz
+        const io = req.app.get("io");
+        io.to(matchId.toString()).emit("quiz_finished", {
+          message: "Le quiz est terminé ! Merci d’avoir joué.",
+        });
+      }
+    }
+
+    return res.status(200).json({ message: "Réponse enregistrée" });
   } catch (error) {
     console.error("Erreur updateMatchWithQuestion:", error);
-    res.status(500).json({ message: "Erreur interne", error: error.message });
+    return res
+      .status(500)
+      .json({ message: "Erreur serveur", error: error.message });
   }
 };
 
@@ -345,8 +425,6 @@ const getNextQuestion = async (req, res) => {
     }
 
     const next = Quizz[alreadyAsked];
-
- 
 
     return res.status(200).json({
       index: alreadyAsked,
