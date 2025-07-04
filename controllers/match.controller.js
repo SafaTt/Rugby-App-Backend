@@ -266,8 +266,15 @@ const updateMatchWithQuestion = async (req, res) => {
       }
     );
 
+    // Recharge le match pour avoir la mise à jour complète
+    match = await Match.findById(matchId);
+
     // Attribue le score au plus rapide (si bonne réponse)
-    const correctAnswers = match.questionsAsked[qIndex].answers
+    const updatedQIndex = match.questionsAsked.findIndex(
+      (q) => q.question.text === question.text
+    );
+
+    const correctAnswers = match.questionsAsked[updatedQIndex].answers
       .filter((a) => a.isCorrect)
       .sort((a, b) => new Date(a.answeredAt) - new Date(b.answeredAt));
 
@@ -295,16 +302,14 @@ const updateMatchWithQuestion = async (req, res) => {
       }
     }
 
-    // == ✅ LOGIQUE SOCKET POUR PROCHAINE QUESTION ==
+    // == LOGIQUE SOCKET POUR PASSER À LA QUESTION SUIVANTE ==
 
-    const updatedMatch = await Match.findById(matchId);
-    const currentQ = updatedMatch.questionsAsked[qIndex];
+    const currentQ = match.questionsAsked[updatedQIndex];
 
-    // Si les deux joueurs ont répondu, passer à la suivante
+    // Si les deux joueurs ont répondu, on passe à la question suivante
     if (currentQ.answers.length >= 2) {
-      const nextIndex = updatedMatch.questionsAsked.length;
+      const nextIndex = match.questionsAsked.length;
 
-      // Vérifie s’il reste des questions
       if (nextIndex < Quizz.length) {
         const nextQ = Quizz[nextIndex];
 
@@ -316,7 +321,7 @@ const updateMatchWithQuestion = async (req, res) => {
             }, {})
           : nextQ.choices;
 
-        updatedMatch.questionsAsked.push({
+        match.questionsAsked.push({
           question: {
             text: nextQ.question,
             options: formattedOptions,
@@ -325,10 +330,10 @@ const updateMatchWithQuestion = async (req, res) => {
           answers: [],
         });
 
-        await updatedMatch.save();
+        await match.save();
 
-        // 🔥 Émettre la prochaine question via socket
-        const io = req.app.get("io"); // injecté depuis server.js
+        // Émettre la prochaine question via socket
+        const io = req.app.get("io");
         io.to(matchId.toString()).emit("next_question", {
           question: {
             text: nextQ.question,
@@ -337,12 +342,44 @@ const updateMatchWithQuestion = async (req, res) => {
           },
         });
       } else {
-        // ✅ Fin du quiz
+        // Fin du quiz
         const io = req.app.get("io");
         io.to(matchId.toString()).emit("quiz_finished", {
           message: "Le quiz est terminé ! Merci d’avoir joué.",
         });
       }
+    }
+
+    // === Émettre la mise à jour des scores en temps réel ===
+
+    let scoreUserOne = 0;
+    let scoreUserTwo = 0;
+
+    // Recharge avec populates pour récupérer les joueurs
+    const fullMatch = await Match.findById(matchId)
+      .populate("creatorId")
+      .populate("joinerId");
+
+    fullMatch.questionsAsked.forEach((q) => {
+      q.answers.forEach((a) => {
+        if (a.playerId.toString() === fullMatch.creatorId._id.toString()) {
+          scoreUserOne += a.score || 0;
+        } else if (
+          fullMatch.joinerId &&
+          a.playerId.toString() === fullMatch.joinerId._id.toString()
+        ) {
+          scoreUserTwo += a.score || 0;
+        }
+      });
+    });
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(matchId).emit("score_updated", {
+        matchId,
+        scoreUserOne,
+        scoreUserTwo,
+      });
     }
 
     return res.status(200).json({ message: "Réponse enregistrée" });
