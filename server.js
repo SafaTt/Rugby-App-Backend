@@ -45,6 +45,14 @@ app.get("/", (req, res) => {
 });
 // 🔗 Rendre io accessible dans les controllers
 app.set("io", io);
+const getRandomQuestion = (quizzList, alreadyAsked) => {
+  const notAsked = quizzList.filter(
+    (q) => !alreadyAsked.some((asked) => asked.question.text === q.question)
+  );
+  if (notAsked.length === 0) return null;
+  const index = Math.floor(Math.random() * notAsked.length);
+  return notAsked[index];
+};
 
 io.on("connection", (socket) => {
   console.log("✅ New client connected");
@@ -64,7 +72,7 @@ io.on("connection", (socket) => {
 
       // ⚡️ Démarre immédiatement le quiz ici
       if (!match.questionsAsked || match.questionsAsked.length === 0) {
-        const first = Quizz[0];
+        const first = getRandomQuestion(Quizz, match.questionsAsked || []);
         if (!first) return;
 
         const formattedOptions = Array.isArray(first.choices)
@@ -108,7 +116,7 @@ io.on("connection", (socket) => {
     if (!match) return;
 
     if (!match.questionsAsked || match.questionsAsked.length === 0) {
-      const first = Quizz[0];
+      const first = getRandomQuestion(Quizz, match.questionsAsked || []);
       if (!first) return;
 
       const formattedOptions = Array.isArray(first.choices)
