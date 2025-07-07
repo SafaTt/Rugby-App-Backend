@@ -23,6 +23,7 @@ app.use((req, res, next) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/match", matchRoutes);
 const server = http.createServer(app);
+const matchTimers = new Map();
 
 const io = socketIo(server, {
   cors: {
@@ -45,6 +46,7 @@ app.get("/", (req, res) => {
 });
 // 🔗 Rendre io accessible dans les controllers
 app.set("io", io);
+
 const getRandomQuestion = (quizzList, alreadyAsked) => {
   const notAsked = quizzList.filter(
     (q) => !alreadyAsked.some((asked) => asked.question.text === q.question)
@@ -62,6 +64,61 @@ io.on("connection", (socket) => {
     console.log(`Socket ${socket.id} joined room ${matchId}`);
   });
 
+  const proceedToNextQuestion = async (matchId) => {
+    const match = await Match.findById(matchId);
+    if (!match || match.isFinished) return;
+
+    const next = getRandomQuestion(Quizz, match.questionsAsked);
+    if (!next) {
+      match.isFinished = true;
+      await match.save();
+      io.to(matchId).emit("match_finished", { matchId });
+      return;
+    }
+
+    const formatted = Array.isArray(next.choices)
+      ? next.choices.reduce((acc, choice, idx) => {
+          const letters = ["A", "B", "C", "D"];
+          acc[letters[idx]] = choice;
+          return acc;
+        }, {})
+      : next.choices;
+
+    match.questionsAsked.push({
+      question: {
+        text: next.question,
+        options: formatted,
+        correctOption: next.correctAnswer,
+      },
+      answers: [],
+    });
+
+    await match.save();
+
+    io.to(matchId).emit("next_question", {
+      question: {
+        text: next.question,
+        choices: formatted,
+        correctAnswer: next.correctAnswer,
+      },
+    });
+
+    // Nouveau timer de 10s pour la prochaine question
+    if (matchTimers.has(matchId)) {
+      clearTimeout(matchTimers.get(matchId).timer);
+    }
+
+    const timer = setTimeout(() => {
+      const state = matchTimers.get(matchId);
+      if (!state?.handled) {
+        matchTimers.delete(matchId);
+        proceedToNextQuestion(matchId);
+      }
+    }, 10000);
+
+    matchTimers.set(matchId, { timer, handled: false });
+  };
+
   socket.on("match_joined", async (data) => {
     const matchId = data.match._id;
     let match = await Match.findById(matchId);
@@ -70,12 +127,11 @@ io.on("connection", (socket) => {
     if (match.playerOneTeam && match.playerTwoTeam) {
       console.log("🎮 Deux joueurs présents, démarrage du quiz");
 
-      // ⚡️ Démarre immédiatement le quiz ici
       if (!match.questionsAsked || match.questionsAsked.length === 0) {
-        const first = getRandomQuestion(Quizz, match.questionsAsked || []);
+        const first = getRandomQuestion(Quizz, []);
         if (!first) return;
 
-        const formattedOptions = Array.isArray(first.choices)
+        const formatted = Array.isArray(first.choices)
           ? first.choices.reduce((acc, choice, idx) => {
               const letters = ["A", "B", "C", "D"];
               acc[letters[idx]] = choice;
@@ -86,7 +142,7 @@ io.on("connection", (socket) => {
         match.questionsAsked.push({
           question: {
             text: first.question,
-            options: formattedOptions,
+            options: formatted,
             correctOption: first.correctAnswer,
           },
           answers: [],
@@ -96,30 +152,61 @@ io.on("connection", (socket) => {
         match = await Match.findById(matchId);
       }
 
-      const firstQuestion = match.questionsAsked[0];
-      if (!firstQuestion) return;
+      const currentQuestion =
+        match.questionsAsked[match.questionsAsked.length - 1];
 
       io.to(matchId).emit("quiz_start", { matchId });
       io.to(matchId).emit("next_question", {
         question: {
-          text: firstQuestion.question.text,
-          choices: firstQuestion.question.options,
-          correctAnswer: firstQuestion.question.correctOption,
+          text: currentQuestion.question.text,
+          choices: currentQuestion.question.options,
+          correctAnswer: currentQuestion.question.correctOption,
         },
       });
+
+      // Timer 10s pour la première question
+      const timer = setTimeout(() => {
+        const state = matchTimers.get(matchId);
+        if (!state?.handled) {
+          matchTimers.delete(matchId);
+          proceedToNextQuestion(matchId);
+        }
+      }, 10000);
+
+      matchTimers.set(matchId, { timer, handled: false });
     }
   });
 
-  // Quand serveur reçoit 'quiz_start', il envoie la 1ère question
+  socket.on("answer_question", async ({ matchId, userId, selectedOption }) => {
+    const match = await Match.findById(matchId);
+    if (!match || match.isFinished) return;
+
+    const lastQuestion = match.questionsAsked[match.questionsAsked.length - 1];
+    const alreadyAnswered = lastQuestion.answers.find(
+      (a) => a.userId === userId
+    );
+    if (alreadyAnswered) return;
+
+    lastQuestion.answers.push({ userId, selectedOption });
+    await match.save();
+
+    const state = matchTimers.get(matchId);
+    if (state && !state.handled) {
+      clearTimeout(state.timer);
+      matchTimers.set(matchId, { timer: null, handled: true });
+      proceedToNextQuestion(matchId);
+    }
+  });
+
   socket.on("quiz_start", async ({ matchId }) => {
     let match = await Match.findById(matchId);
     if (!match) return;
 
     if (!match.questionsAsked || match.questionsAsked.length === 0) {
-      const first = getRandomQuestion(Quizz, match.questionsAsked || []);
+      const first = Quizz[0];
       if (!first) return;
 
-      const formattedOptions = Array.isArray(first.choices)
+      const formatted = Array.isArray(first.choices)
         ? first.choices.reduce((acc, choice, idx) => {
             const letters = ["A", "B", "C", "D"];
             acc[letters[idx]] = choice;
@@ -130,7 +217,7 @@ io.on("connection", (socket) => {
       match.questionsAsked.push({
         question: {
           text: first.question,
-          options: formattedOptions,
+          options: formatted,
           correctOption: first.correctAnswer,
         },
         answers: [],
@@ -139,14 +226,10 @@ io.on("connection", (socket) => {
       await match.save();
     }
 
-    // Récupère la 1ère question dans la DB
     match = await Match.findById(matchId);
     const firstQuestion = match.questionsAsked[0];
     if (!firstQuestion) return;
 
-    // N'EMETS PAS 'quiz_start' ici à nouveau (sinon boucle)
-
-    // Envoie la question aux joueurs dans la room
     io.to(matchId).emit("next_question", {
       question: {
         text: firstQuestion.question.text,
@@ -154,10 +237,20 @@ io.on("connection", (socket) => {
         correctAnswer: firstQuestion.question.correctOption,
       },
     });
+
+    // Timer aussi pour quiz_start (en cas de lancement via admin)
+    const timer = setTimeout(() => {
+      const state = matchTimers.get(matchId);
+      if (!state?.handled) {
+        matchTimers.delete(matchId);
+        proceedToNextQuestion(matchId);
+      }
+    }, 10000);
+
+    matchTimers.set(matchId, { timer, handled: false });
   });
 
   socket.on("request_current_question", async ({ matchId }) => {
-    console.log("📥 request_current_question reçu pour matchId:", matchId);
     const match = await Match.findById(matchId);
     if (!match || !match.questionsAsked || match.questionsAsked.length === 0)
       return;
@@ -165,7 +258,6 @@ io.on("connection", (socket) => {
     const currentQuestion =
       match.questionsAsked[match.questionsAsked.length - 1];
 
-    // ✅ CHANGER CECI
     io.to(matchId).emit("next_question", {
       question: {
         text: currentQuestion.question.text,

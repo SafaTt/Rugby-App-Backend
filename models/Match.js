@@ -53,6 +53,10 @@ const matchSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isFinished: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

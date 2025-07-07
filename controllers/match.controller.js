@@ -477,6 +477,22 @@ const getNextQuestion = async (req, res) => {
   }
 };
 
+const finishMatch = async (req, res) => {
+  const { matchId } = req.params;
+
+  try {
+    const match = await Match.findById(matchId);
+    if (!match) return res.status(404).json({ message: "Match not found" });
+
+    match.isFinished = true;
+    await match.save();
+
+    return res.status(200).json({ message: "Match marked as finished" });
+  } catch (error) {
+    return res.status(500).json({ message: "Erreur serveur", error });
+  }
+};
+
 module.exports = {
   createMatch,
   joinMatch,
@@ -489,4 +505,5 @@ module.exports = {
   calculateScores,
   getQuiz,
   getNextQuestion,
+  finishMatch,
 };

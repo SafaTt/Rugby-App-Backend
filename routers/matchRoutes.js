@@ -33,5 +33,7 @@ router.put("/:id/question", auth, matchController.updateMatchWithQuestion);
 router.get("/calcul-score/:id", matchController.calculateScores);
 router.get("/quiz", matchController.getQuiz);
 router.get("/:id/next-question", matchController.getNextQuestion);
+// routes/matchRoutes.ts
+router.patch("/:matchId/finish", matchController.finishMatch);
 
 module.exports = router;
