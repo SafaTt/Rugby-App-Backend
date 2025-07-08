@@ -85,72 +85,77 @@ io.on("connection", (socket) => {
         }, {})
       : next.choices;
 
-    // ✅ S'assurer que la dernière question précédente n'est plus une conversion
-    const lastQ = match.questionsAsked[match.questionsAsked.length - 1];
-    if (lastQ && lastQ.question) {
-      lastQ.question.isConversion = false;
-      lastQ.question.conversionPlayerId = null;
-    }
-
-    match.questionsAsked.push({
-      question: {
-        text: next.question,
-        options: formatted,
-        correctOption: next.correctAnswer,
-        isConversion: false, // on explicite
-        conversionPlayerId: null,
-      },
-      answers: [],
-    });
-
-    await match.save();
-
+    // On récupère la question précédente (celle avant la dernière posée)
+    const lastQuestionIndex = match.questionsAsked.length - 1;
     const previousQuestion =
-      match.questionsAsked[match.questionsAsked.length - 2];
+      lastQuestionIndex >= 0 ? match.questionsAsked[lastQuestionIndex] : null;
+
+    // Vérifie si on doit lancer une conversion (une seule bonne réponse à la précédente)
+    let launchConversion = false;
+    let playerIdToConvert = null;
+
     if (previousQuestion) {
       const correctAnswers = previousQuestion.answers.filter(
         (a) => a.selectedOption === previousQuestion.question.correctOption
       );
 
-      if (correctAnswers.length === 1) {
-        const playerIdToConvert = correctAnswers[0].playerId;
-
-        console.log("playerIdToConvert", playerIdToConvert);
-
-        // ✅ Marquer la dernière question comme conversion
-        const lastIndex = match.questionsAsked.length - 1;
-        match.questionsAsked[lastIndex].question.isConversion = true;
-        match.questionsAsked[lastIndex].question.conversionPlayerId =
-          playerIdToConvert;
-        await match.save();
-
-        io.to(matchId.toString()).emit("conversion_question", {
-          playerId: playerIdToConvert,
-          question: {
-            text: next.question,
-            choices: formatted,
-            correctAnswer: next.correctAnswer,
-          },
-        });
-
-        // ✅ Timer de 10s pour passer à la prochaine question
-        if (matchTimers.has(matchId)) {
-          clearTimeout(matchTimers.get(matchId).timer);
-        }
-
-        const timer = setTimeout(() => {
-          const state = matchTimers.get(matchId);
-          if (!state?.handled) {
-            matchTimers.delete(matchId);
-            proceedToNextQuestion(matchId);
-          }
-        }, 10000);
-
-        matchTimers.set(matchId, { timer, handled: false });
-
-        return;
+      // On ne lance la conversion que si une seule bonne réponse ET si la question précédente n'était pas une conversion
+      if (
+        correctAnswers.length === 1 &&
+        !previousQuestion.question.isConversion
+      ) {
+        launchConversion = true;
+        playerIdToConvert = correctAnswers[0].playerId;
       }
     }
+
+    // Prépare la nouvelle question
+    let newQuestion = {
+      question: {
+        text: next.question,
+        options: formatted,
+        correctOption: next.correctAnswer,
+        isConversion: false,
+        conversionPlayerId: null,
+      },
+      answers: [],
+    };
+
+    if (launchConversion) {
+      newQuestion.question.isConversion = true;
+      newQuestion.question.conversionPlayerId = playerIdToConvert;
+
+      match.questionsAsked.push(newQuestion);
+      await match.save();
+
+      io.to(matchId.toString()).emit("conversion_question", {
+        playerId: playerIdToConvert,
+        question: {
+          text: next.question,
+          choices: formatted,
+          correctAnswer: next.correctAnswer,
+        },
+      });
+
+      if (matchTimers.has(matchId)) {
+        clearTimeout(matchTimers.get(matchId).timer);
+      }
+
+      const timer = setTimeout(() => {
+        const state = matchTimers.get(matchId);
+        if (!state?.handled) {
+          matchTimers.delete(matchId);
+          proceedToNextQuestion(matchId);
+        }
+      }, 10000);
+
+      matchTimers.set(matchId, { timer, handled: false });
+      return; // ne pas ajouter la question normale
+    }
+
+    // Sinon, ajout question normale
+    match.questionsAsked.push(newQuestion);
+    await match.save();
 
     io.to(matchId).emit("next_question", {
       question: {
@@ -200,6 +205,8 @@ io.on("connection", (socket) => {
             text: first.question,
             options: formatted,
             correctOption: first.correctAnswer,
+            isConversion: false,
+            conversionPlayerId: null,
           },
           answers: [],
         });
@@ -249,14 +256,18 @@ io.on("connection", (socket) => {
       lastQuestion.question.conversionPlayerId &&
       lastQuestion.question.conversionPlayerId.toString() === userId.toString();
 
+    // Calcul du score : 2 points pour conversion player correct, 4 points pour question normale correcte
     const scoreToAdd = isCorrect ? (isConversionPlayer ? 2 : 4) : 0;
 
-    lastQuestion.answers.push({ playerId, selectedOption, score: scoreToAdd });
+    lastQuestion.answers.push({ userId, selectedOption, score: scoreToAdd });
     await match.save();
 
+    // Correction ici : la conversion concerne la question précédente, pas la dernière
     const prevQuestion = match.questionsAsked[match.questionsAsked.length - 2];
     const isConversionPhase =
-      prevQuestion && prevQuestion.answers.length === 1 && isConversion;
+      prevQuestion &&
+      prevQuestion.question.isConversion &&
+      prevQuestion.answers.length === 1;
 
     if (isConversionPhase) {
       io.to(matchId).emit("conversion_result", {
@@ -320,6 +331,8 @@ io.on("connection", (socket) => {
           text: first.question,
           options: formatted,
           correctOption: first.correctAnswer,
+          isConversion: false,
+          conversionPlayerId: null,
         },
         answers: [],
       });

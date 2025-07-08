@@ -1437,7 +1437,7 @@ const Quizz = [
   {
     question: "What year did the Newcastle Knights make their debut?",
     choices: { A: "1908", B: "1982", C: "1988", D: "1995" },
-    correctAnswer: "BC",
+    correctAnswer: "B",
   },
   {
     question:
