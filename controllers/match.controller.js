@@ -171,6 +171,7 @@ const cancelOldPendingMatches = async () => {
 };
 
 // Ajouter une nouvelle question avec ses réponses à un match existant
+// with kick at goal
 const updateMatchWithQuestion = async (req, res) => {
   try {
     const matchId = req.params.id;
@@ -191,14 +192,12 @@ const updateMatchWithQuestion = async (req, res) => {
     const isCorrect = selectedOption === question.correctOption;
     const answeredAt = new Date();
 
-    // 1. Vérifie si la question existe déjà dans le match
     let match = await Match.findOne({
       _id: matchId,
       "questionsAsked.question.text": question.text,
     });
 
     if (!match) {
-      // Si la question n'existe pas, on l'ajoute avec cette réponse
       match = await Match.findByIdAndUpdate(
         matchId,
         {
@@ -231,7 +230,6 @@ const updateMatchWithQuestion = async (req, res) => {
     const qIndex = match.questionsAsked.findIndex(
       (q) => q.question.text === question.text
     );
-
     if (qIndex === -1) {
       return res.status(404).json({ message: "Question introuvable" });
     }
@@ -240,14 +238,12 @@ const updateMatchWithQuestion = async (req, res) => {
     const alreadyAnswered = answers.some(
       (a) => a.playerId.toString() === userId.toString()
     );
-
     if (alreadyAnswered) {
       return res
         .status(400)
         .json({ message: "Vous avez déjà répondu à cette question" });
     }
 
-    // Ajoute la réponse du joueur
     await Match.updateOne(
       {
         _id: matchId,
@@ -266,10 +262,8 @@ const updateMatchWithQuestion = async (req, res) => {
       }
     );
 
-    // Recharge le match pour avoir la mise à jour complète
     match = await Match.findById(matchId);
 
-    // Attribue le score au plus rapide (si bonne réponse)
     const updatedQIndex = match.questionsAsked.findIndex(
       (q) => q.question.text === question.text
     );
@@ -302,17 +296,14 @@ const updateMatchWithQuestion = async (req, res) => {
       }
     }
 
-    // == LOGIQUE SOCKET POUR PASSER À LA QUESTION SUIVANTE ==
-
     const currentQ = match.questionsAsked[updatedQIndex];
+    const io = req.app.get("io");
 
-    // Si les deux joueurs ont répondu, on passe à la question suivante
     if (currentQ.answers.length >= 2) {
       const nextIndex = match.questionsAsked.length;
 
       if (nextIndex < Quizz.length) {
         const nextQ = Quizz[nextIndex];
-
         const formattedOptions = Array.isArray(nextQ.choices)
           ? nextQ.choices.reduce((acc, choice, idx) => {
               const letters = ["A", "B", "C", "D"];
@@ -332,8 +323,6 @@ const updateMatchWithQuestion = async (req, res) => {
 
         await match.save();
 
-        // Émettre la prochaine question via socket
-        const io = req.app.get("io");
         io.to(matchId.toString()).emit("next_question", {
           question: {
             text: nextQ.question,
@@ -342,20 +331,15 @@ const updateMatchWithQuestion = async (req, res) => {
           },
         });
       } else {
-        // Fin du quiz
-        const io = req.app.get("io");
         io.to(matchId.toString()).emit("quiz_finished", {
           message: "Le quiz est terminé ! Merci d’avoir joué.",
         });
       }
     }
 
-    // === Émettre la mise à jour des scores en temps réel ===
-
     let scoreUserOne = 0;
     let scoreUserTwo = 0;
 
-    // Recharge avec populates pour récupérer les joueurs
     const fullMatch = await Match.findById(matchId)
       .populate("creatorId")
       .populate("joinerId");
@@ -373,13 +357,52 @@ const updateMatchWithQuestion = async (req, res) => {
       });
     });
 
-    const io = req.app.get("io");
     if (io) {
       io.to(matchId).emit("score_updated", {
         matchId,
         scoreUserOne,
         scoreUserTwo,
       });
+    }
+
+    // 🎯 Conversion Kick Logic
+    if (!match.hasConversionStarted) {
+      let teamToConvert = null;
+
+      if (scoreUserOne === 4 && !match.conversionBy) {
+        teamToConvert = "playerOne";
+      } else if (scoreUserTwo === 4 && !match.conversionBy) {
+        teamToConvert = "playerTwo";
+      }
+
+      if (teamToConvert) {
+        match.hasConversionStarted = true;
+        match.conversionBy = teamToConvert;
+        await match.save();
+
+        const convQ =
+          Quizz.find((q) => q.isConversion) ||
+          Quizz[Math.floor(Math.random() * Quizz.length)];
+        const formattedConvOptions = Array.isArray(convQ.choices)
+          ? convQ.choices.reduce((acc, choice, idx) => {
+              const letters = ["A", "B", "C", "D"];
+              acc[letters[idx]] = choice;
+              return acc;
+            }, {})
+          : convQ.choices;
+
+        io.to(matchId.toString()).emit("conversion_question", {
+          team: teamToConvert,
+          matchId,
+          question: {
+            text: convQ.question,
+            choices: formattedConvOptions,
+            correctAnswer: convQ.correctAnswer,
+          },
+        });
+
+        return res.status(200).json({ message: "Conversion déclenchée" });
+      }
     }
 
     return res.status(200).json({ message: "Réponse enregistrée" });
@@ -479,14 +502,14 @@ const getNextQuestion = async (req, res) => {
 
 const finishMatch = async (req, res) => {
   const { matchId } = req.params;
-
+  const io = req.io;
   try {
     const match = await Match.findById(matchId);
     if (!match) return res.status(404).json({ message: "Match not found" });
 
     match.isFinished = true;
     await match.save();
-
+    io.to(matchId).emit("match_finished", { matchId });
     return res.status(200).json({ message: "Match marked as finished" });
   } catch (error) {
     return res.status(500).json({ message: "Erreur serveur", error });

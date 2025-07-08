@@ -95,6 +95,29 @@ io.on("connection", (socket) => {
 
     await match.save();
 
+    // Déterminer si une conversion est nécessaire
+    const previousQuestion =
+      match.questionsAsked[match.questionsAsked.length - 2];
+    if (previousQuestion) {
+      const correctAnswers = previousQuestion.answers.filter(
+        (a) => a.selectedOption === previousQuestion.question.correctOption
+      );
+
+      if (correctAnswers.length === 1) {
+        const playerIdToConvert = correctAnswers[0].playerId;
+        io.to(matchId.toString()).emit("conversion_question", {
+          playerId: playerIdToConvert,
+          question: {
+            text: next.question,
+            choices: formatted,
+            correctAnswer: next.correctAnswer,
+          },
+        });
+
+        return; // ⚠️ important pour ne pas envoyer next_question en même temps
+      }
+    }
+
     io.to(matchId).emit("next_question", {
       question: {
         text: next.question,
@@ -103,7 +126,7 @@ io.on("connection", (socket) => {
       },
     });
 
-    // Nouveau timer de 10s pour la prochaine question
+    // Timer de 10s
     if (matchTimers.has(matchId)) {
       clearTimeout(matchTimers.get(matchId).timer);
     }
@@ -164,7 +187,6 @@ io.on("connection", (socket) => {
         },
       });
 
-      // Timer 10s pour la première question
       const timer = setTimeout(() => {
         const state = matchTimers.get(matchId);
         if (!state?.handled) {
@@ -189,6 +211,19 @@ io.on("connection", (socket) => {
 
     lastQuestion.answers.push({ userId, selectedOption });
     await match.save();
+
+    // Conversion : afficher résultat au joueur
+    const isConversion =
+      match.questionsAsked.length >= 2 &&
+      match.questionsAsked[match.questionsAsked.length - 2].answers.length ===
+        1;
+    if (isConversion) {
+      const correct = selectedOption === lastQuestion.question.correctOption;
+      io.to(matchId).emit("conversion_result", {
+        playerId: userId,
+        success: correct,
+      });
+    }
 
     const state = matchTimers.get(matchId);
     if (state && !state.handled) {
@@ -238,7 +273,6 @@ io.on("connection", (socket) => {
       },
     });
 
-    // Timer aussi pour quiz_start (en cas de lancement via admin)
     const timer = setTimeout(() => {
       const state = matchTimers.get(matchId);
       if (!state?.handled) {
