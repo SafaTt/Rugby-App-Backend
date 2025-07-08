@@ -9,6 +9,7 @@ const authRoutes = require("./routers/authRoutes");
 const matchRoutes = require("./routers/matchRoutes");
 const Match = require("./models/Match");
 const Quizz = require("./models/Quizz");
+const { log } = require("console");
 
 // const { startMatchCleaner } = require("./utils/matchCleaner");
 dotenv.config();
@@ -84,18 +85,26 @@ io.on("connection", (socket) => {
         }, {})
       : next.choices;
 
+    // ✅ S'assurer que la dernière question précédente n'est plus une conversion
+    const lastQ = match.questionsAsked[match.questionsAsked.length - 1];
+    if (lastQ && lastQ.question) {
+      lastQ.question.isConversion = false;
+      lastQ.question.conversionPlayerId = null;
+    }
+
     match.questionsAsked.push({
       question: {
         text: next.question,
         options: formatted,
         correctOption: next.correctAnswer,
+        isConversion: false, // on explicite
+        conversionPlayerId: null,
       },
       answers: [],
     });
 
     await match.save();
 
-    // Déterminer si une conversion est nécessaire
     const previousQuestion =
       match.questionsAsked[match.questionsAsked.length - 2];
     if (previousQuestion) {
@@ -105,6 +114,16 @@ io.on("connection", (socket) => {
 
       if (correctAnswers.length === 1) {
         const playerIdToConvert = correctAnswers[0].playerId;
+
+        console.log("playerIdToConvert", playerIdToConvert);
+
+        // ✅ Marquer la dernière question comme conversion
+        const lastIndex = match.questionsAsked.length - 1;
+        match.questionsAsked[lastIndex].question.isConversion = true;
+        match.questionsAsked[lastIndex].question.conversionPlayerId =
+          playerIdToConvert;
+        await match.save();
+
         io.to(matchId.toString()).emit("conversion_question", {
           playerId: playerIdToConvert,
           question: {
@@ -114,7 +133,22 @@ io.on("connection", (socket) => {
           },
         });
 
-        return; // ⚠️ important pour ne pas envoyer next_question en même temps
+        // ✅ Timer de 10s pour passer à la prochaine question
+        if (matchTimers.has(matchId)) {
+          clearTimeout(matchTimers.get(matchId).timer);
+        }
+
+        const timer = setTimeout(() => {
+          const state = matchTimers.get(matchId);
+          if (!state?.handled) {
+            matchTimers.delete(matchId);
+            proceedToNextQuestion(matchId);
+          }
+        }, 10000);
+
+        matchTimers.set(matchId, { timer, handled: false });
+
+        return;
       }
     }
 
@@ -126,7 +160,6 @@ io.on("connection", (socket) => {
       },
     });
 
-    // Timer de 10s
     if (matchTimers.has(matchId)) {
       clearTimeout(matchTimers.get(matchId).timer);
     }
@@ -209,21 +242,54 @@ io.on("connection", (socket) => {
     );
     if (alreadyAnswered) return;
 
-    lastQuestion.answers.push({ userId, selectedOption });
+    const isCorrect = selectedOption === lastQuestion.question.correctOption;
+    const isConversion = lastQuestion.question.isConversion === true;
+    const isConversionPlayer =
+      isConversion &&
+      lastQuestion.question.conversionPlayerId &&
+      lastQuestion.question.conversionPlayerId.toString() === userId.toString();
+
+    const scoreToAdd = isCorrect ? (isConversionPlayer ? 2 : 4) : 0;
+
+    lastQuestion.answers.push({ playerId, selectedOption, score: scoreToAdd });
     await match.save();
 
-    // Conversion : afficher résultat au joueur
-    const isConversion =
-      match.questionsAsked.length >= 2 &&
-      match.questionsAsked[match.questionsAsked.length - 2].answers.length ===
-        1;
-    if (isConversion) {
-      const correct = selectedOption === lastQuestion.question.correctOption;
+    const prevQuestion = match.questionsAsked[match.questionsAsked.length - 2];
+    const isConversionPhase =
+      prevQuestion && prevQuestion.answers.length === 1 && isConversion;
+
+    if (isConversionPhase) {
       io.to(matchId).emit("conversion_result", {
         playerId: userId,
-        success: correct,
+        success: isCorrect,
       });
     }
+
+    let scoreUserOne = 0;
+    let scoreUserTwo = 0;
+
+    const fullMatch = await Match.findById(matchId)
+      .populate("creatorId")
+      .populate("joinerId");
+
+    fullMatch.questionsAsked.forEach((q) => {
+      q.answers.forEach((a) => {
+        if (a.userId.toString() === fullMatch.creatorId._id.toString()) {
+          scoreUserOne += a.score || 0;
+        } else if (
+          fullMatch.joinerId &&
+          a.userId.toString() === fullMatch.joinerId._id.toString()
+        ) {
+          scoreUserTwo += a.score || 0;
+        }
+      });
+    });
+
+    io.to(matchId).emit("score_updated", {
+      matchId,
+      scoreUserOne,
+      scoreUserTwo,
+    });
 
     const state = matchTimers.get(matchId);
     if (state && !state.handled) {

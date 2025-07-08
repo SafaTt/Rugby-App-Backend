@@ -189,15 +189,23 @@ const updateMatchWithQuestion = async (req, res) => {
         .json({ message: "Données de question incomplètes" });
     }
 
+    // Vérifie si c'est une question de conversion (à envoyer depuis client)
+    const isConversionQuestion = question.isConversion === true;
+
+    const scoreForCorrectAnswer = isConversionQuestion ? 2 : 4;
+    const scoreForFastest = isConversionQuestion ? 2 : 4;
+
     const isCorrect = selectedOption === question.correctOption;
     const answeredAt = new Date();
 
+    // Cherche une question déjà posée avec ce texte
     let match = await Match.findOne({
       _id: matchId,
       "questionsAsked.question.text": question.text,
     });
 
     if (!match) {
+      // Nouvelle question dans le match
       match = await Match.findByIdAndUpdate(
         matchId,
         {
@@ -207,6 +215,7 @@ const updateMatchWithQuestion = async (req, res) => {
                 text: question.text,
                 options: question.options,
                 correctOption: question.correctOption,
+                isConversion: isConversionQuestion, // garde le flag
               },
               answers: [
                 {
@@ -214,7 +223,7 @@ const updateMatchWithQuestion = async (req, res) => {
                   selectedOption,
                   isCorrect,
                   answeredAt,
-                  score: isCorrect ? 4 : 0,
+                  score: isCorrect ? scoreForCorrectAnswer : 0,
                 },
               ],
             },
@@ -227,6 +236,7 @@ const updateMatchWithQuestion = async (req, res) => {
         .json({ message: "Réponse enregistrée (nouvelle question)" });
     }
 
+    // Question existante, ajouter réponse
     const qIndex = match.questionsAsked.findIndex(
       (q) => q.question.text === question.text
     );
@@ -256,25 +266,27 @@ const updateMatchWithQuestion = async (req, res) => {
             selectedOption,
             isCorrect,
             answeredAt,
-            score: 0,
+            score: 0, // score initial à 0, mise à jour du plus rapide après
           },
         },
       }
     );
 
+    // Récupère match à jour
     match = await Match.findById(matchId);
 
     const updatedQIndex = match.questionsAsked.findIndex(
       (q) => q.question.text === question.text
     );
 
+    // Trouve le plus rapide correct
     const correctAnswers = match.questionsAsked[updatedQIndex].answers
       .filter((a) => a.isCorrect)
       .sort((a, b) => new Date(a.answeredAt) - new Date(b.answeredAt));
 
     if (correctAnswers.length > 0) {
       const fastest = correctAnswers[0];
-      if (fastest.score !== 4) {
+      if (fastest.score !== scoreForFastest) {
         await Match.updateOne(
           {
             _id: matchId,
@@ -283,7 +295,7 @@ const updateMatchWithQuestion = async (req, res) => {
           },
           {
             $set: {
-              "questionsAsked.$[q].answers.$[a].score": 4,
+              "questionsAsked.$[q].answers.$[a].score": scoreForFastest,
             },
           },
           {
@@ -317,6 +329,7 @@ const updateMatchWithQuestion = async (req, res) => {
             text: nextQ.question,
             options: formattedOptions,
             correctOption: nextQ.correctAnswer,
+            isConversion: nextQ.isConversion || false,
           },
           answers: [],
         });
@@ -337,6 +350,7 @@ const updateMatchWithQuestion = async (req, res) => {
       }
     }
 
+    // Calcul des scores totaux par joueur
     let scoreUserOne = 0;
     let scoreUserTwo = 0;
 
@@ -365,7 +379,7 @@ const updateMatchWithQuestion = async (req, res) => {
       });
     }
 
-    // 🎯 Conversion Kick Logic
+    // 🎯 Conversion Kick Logic (lancement conversion si pas déjà lancée)
     if (!match.hasConversionStarted) {
       let teamToConvert = null;
 
