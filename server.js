@@ -60,9 +60,10 @@ const getRandomQuestion = (quizzList, alreadyAsked) => {
 io.on("connection", (socket) => {
   console.log("✅ New client connected");
 
-  socket.on("join_match_room", (matchId) => {
+  socket.on("join_match_room", (matchId, callback) => {
     socket.join(matchId);
-    console.log(`Socket ${socket.id} joined room ${matchId}`);
+    console.log(`✅ Socket ${socket.id} joined room ${matchId}`);
+    if (callback) callback(); // très important
   });
 
   const proceedToNextQuestion = async (matchId) => {
@@ -181,6 +182,8 @@ io.on("connection", (socket) => {
   };
 
   socket.on("match_joined", async (data) => {
+    console.log("📥 Server a reçu match_joined pour match:", data.match);
+
     const matchId = data.match._id;
     let match = await Match.findById(matchId);
     if (!match) return;
