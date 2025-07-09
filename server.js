@@ -123,12 +123,7 @@ io.on("connection", (socket) => {
     };
 
     if (launchConversion) {
-      newQuestion.question.isConversion = true;
-      newQuestion.question.conversionPlayerId = playerIdToConvert;
-
-      match.questionsAsked.push(newQuestion);
-      await match.save();
-
+      // ⚠️ Ne pas ajouter la question maintenant dans match.questionsAsked !
       io.to(matchId.toString()).emit("conversion_question", {
         playerId: playerIdToConvert,
         question: {
@@ -138,20 +133,30 @@ io.on("connection", (socket) => {
         },
       });
 
-      if (matchTimers.has(matchId)) {
-        clearTimeout(matchTimers.get(matchId).timer);
-      }
+      // Stocker temporairement la question de conversion dans une variable annexe (ex: dans matchTimers ?)
+      matchTimers.set(matchId, {
+        timer: setTimeout(() => {
+          const state = matchTimers.get(matchId);
+          if (!state?.handled) {
+            matchTimers.delete(matchId);
+            proceedToNextQuestion(matchId);
+          }
+        }, 10000),
+        handled: false,
+        // Ajoute ici l’état temporaire de la question
+        pendingConversion: {
+          question: {
+            text: next.question,
+            options: formatted,
+            correctOption: next.correctAnswer,
+            isConversion: true,
+            conversionPlayerId: playerIdToConvert,
+          },
+          answers: [],
+        },
+      });
 
-      const timer = setTimeout(() => {
-        const state = matchTimers.get(matchId);
-        if (!state?.handled) {
-          matchTimers.delete(matchId);
-          proceedToNextQuestion(matchId);
-        }
-      }, 10000);
-
-      matchTimers.set(matchId, { timer, handled: false });
-      return; // ne pas ajouter la question normale
+      return;
     }
 
     // Sinon, ajout question normale
