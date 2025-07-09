@@ -65,11 +65,25 @@ io.on("connection", (socket) => {
     console.log(`✅ Socket ${socket.id} joined room ${matchId}`);
     if (callback) callback(); // très important
   });
-
   const proceedToNextQuestion = async (matchId) => {
     const match = await Match.findById(matchId);
     if (!match || match.isFinished) return;
 
+    // 🔄 Vérifie si une conversion était en attente
+    let justInjectedConversion = false;
+
+    const timerState = matchTimers.get(matchId);
+    if (timerState?.pendingConversion) {
+      match.questionsAsked.push(timerState.pendingConversion);
+      await match.save();
+      justInjectedConversion = true;
+
+      // Nettoyer
+      if (timerState.timer) clearTimeout(timerState.timer);
+      matchTimers.set(matchId, { handled: true });
+    }
+
+    // 🎯 Nouvelle question
     const next = getRandomQuestion(Quizz, match.questionsAsked);
     if (!next) {
       match.isFinished = true;
@@ -86,21 +100,19 @@ io.on("connection", (socket) => {
         }, {})
       : next.choices;
 
-    // On récupère la question précédente (celle avant la dernière posée)
+    // 🔍 Analyse dernière question (pas de conversion enchaînée)
     const lastQuestionIndex = match.questionsAsked.length - 1;
     const previousQuestion =
       lastQuestionIndex >= 0 ? match.questionsAsked[lastQuestionIndex] : null;
 
-    // Vérifie si on doit lancer une conversion (une seule bonne réponse à la précédente)
     let launchConversion = false;
     let playerIdToConvert = null;
 
-    if (previousQuestion) {
+    if (previousQuestion && !justInjectedConversion) {
       const correctAnswers = previousQuestion.answers.filter(
         (a) => a.selectedOption === previousQuestion.question.correctOption
       );
 
-      // On ne lance la conversion que si une seule bonne réponse ET si la question précédente n'était pas une conversion
       if (
         correctAnswers.length === 1 &&
         !previousQuestion.question.isConversion
@@ -110,8 +122,7 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Prépare la nouvelle question
-    let newQuestion = {
+    const newQuestion = {
       question: {
         text: next.question,
         options: formatted,
@@ -123,7 +134,6 @@ io.on("connection", (socket) => {
     };
 
     if (launchConversion) {
-      // ⚠️ Ne pas ajouter la question maintenant dans match.questionsAsked !
       io.to(matchId.toString()).emit("conversion_question", {
         playerId: playerIdToConvert,
         question: {
@@ -133,17 +143,22 @@ io.on("connection", (socket) => {
         },
       });
 
-      // Stocker temporairement la question de conversion dans une variable annexe (ex: dans matchTimers ?)
+      if (matchTimers.has(matchId)) {
+        const old = matchTimers.get(matchId);
+        if (old?.timer) clearTimeout(old.timer);
+      }
+
+      const timer = setTimeout(() => {
+        const state = matchTimers.get(matchId);
+        if (!state?.handled) {
+          matchTimers.delete(matchId);
+          proceedToNextQuestion(matchId);
+        }
+      }, 10000);
+
       matchTimers.set(matchId, {
-        timer: setTimeout(() => {
-          const state = matchTimers.get(matchId);
-          if (!state?.handled) {
-            matchTimers.delete(matchId);
-            proceedToNextQuestion(matchId);
-          }
-        }, 10000),
+        timer,
         handled: false,
-        // Ajoute ici l’état temporaire de la question
         pendingConversion: {
           question: {
             text: next.question,
@@ -159,7 +174,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Sinon, ajout question normale
+    // Question normale
     match.questionsAsked.push(newQuestion);
     await match.save();
 
@@ -172,7 +187,8 @@ io.on("connection", (socket) => {
     });
 
     if (matchTimers.has(matchId)) {
-      clearTimeout(matchTimers.get(matchId).timer);
+      const prev = matchTimers.get(matchId);
+      if (prev?.timer) clearTimeout(prev.timer);
     }
 
     const timer = setTimeout(() => {
@@ -192,6 +208,13 @@ io.on("connection", (socket) => {
     const matchId = data.match._id;
     let match = await Match.findById(matchId);
     if (!match) return;
+
+    if (!match.joinerId) {
+      match.joinerId = data.userId;
+      match.playerTwoTeam = data.teamInfo;
+      await match.save();
+      console.log("📝 joinerId et équipe du joueur 2 enregistrés");
+    }
 
     if (match.playerOneTeam && match.playerTwoTeam) {
       console.log("🎮 Deux joueurs présents, démarrage du quiz");
