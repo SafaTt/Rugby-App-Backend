@@ -461,16 +461,6 @@ const calculateScores = async (req, res) => {
       });
     }
 
-    // Émission socket pour mise à jour en temps réel
-    const io = req.app.get("io");
-    if (io) {
-      io.to(matchId).emit("score_updated", {
-        matchId,
-        scoreUserOne,
-        scoreUserTwo,
-      });
-    }
-
     return res.status(200).json({ scoreUserOne, scoreUserTwo });
   } catch (error) {
     console.error("Erreur dans calculateScores :", error);

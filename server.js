@@ -323,7 +323,7 @@ io.on("connection", (socket) => {
     const scoreToAdd = isCorrect ? (isConversionPlayer ? 2 : 4) : 0;
 
     lastQuestion.answers.push({
-      userId: userId,
+      playerId: userId,
       selectedOption,
       score: scoreToAdd,
     });
@@ -339,11 +339,11 @@ io.on("connection", (socket) => {
 
     fullMatch.questionsAsked.forEach((q) => {
       q.answers.forEach((a) => {
-        if (a.userId.toString() === fullMatch.creatorId._id.toString()) {
+        if (a.playerId.toString() === fullMatch.creatorId._id.toString()) {
           scoreUserOne += a.score || 0;
         } else if (
           fullMatch.joinerId &&
-          a.userId.toString() === fullMatch.joinerId._id.toString()
+          a.playerId.toString() === fullMatch.joinerId._id.toString()
         ) {
           scoreUserTwo += a.score || 0;
         }
@@ -368,6 +368,11 @@ io.on("connection", (socket) => {
       io.to(matchId).emit("conversion_result", {
         playerId: userId,
         success: isCorrect,
+      });
+      io.to(matchId).emit("score_updated", {
+        matchId,
+        scoreUserOne,
+        scoreUserTwo,
       });
     }
 
