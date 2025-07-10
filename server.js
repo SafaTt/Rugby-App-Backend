@@ -93,10 +93,6 @@ io.on("connection", (socket) => {
       convQuestion.question.isConversion = true;
 
       match.questionsAsked.push(convQuestion);
-      console.log(
-        "✅ Question de conversion enregistrée :",
-        convQuestion.question
-      );
 
       await match.save();
       justInjectedConversion = true;
@@ -226,13 +222,6 @@ io.on("connection", (socket) => {
     }, 10000);
 
     matchTimers.set(matchId, { timer, handled: false });
-    match.questionsAsked.forEach((q, i) => {
-      console.log(
-        `- Q${i + 1}: ${q.question.text} | isConversion: ${
-          q.question.isConversion
-        }`
-      );
-    });
   };
 
   socket.on("match_joined", async (data) => {
@@ -305,11 +294,12 @@ io.on("connection", (socket) => {
 
   socket.on("answer_question", async ({ matchId, userId, selectedOption }) => {
     const match = await Match.findById(matchId);
+
     if (!match || match.isFinished) return;
 
-    const lastQuestion = match.questionsAsked[match.questionsAsked.length - 1];
+    const lastQuestion = match.questionsAsked.at(-1);
     const alreadyAnswered = lastQuestion.answers.find(
-      (a) => a.userId === userId
+      (a) => a.userId == userId
     );
     if (alreadyAnswered) return;
 
@@ -317,8 +307,8 @@ io.on("connection", (socket) => {
     const isConversion = lastQuestion.question.isConversion === true;
     const isConversionPlayer =
       isConversion &&
-      lastQuestion.question.conversionPlayerId &&
-      lastQuestion.question.conversionPlayerId.toString() === userId.toString();
+      lastQuestion.question.conversionPlayerId?.toString() ===
+        userId.toString();
 
     const scoreToAdd = isCorrect ? (isConversionPlayer ? 2 : 4) : 0;
 
@@ -327,38 +317,33 @@ io.on("connection", (socket) => {
       selectedOption,
       score: scoreToAdd,
     });
+
     await match.save();
 
-    // ✅ Calcul mis à jour AVANT l’emit
+    // ✅ Calcul score en temps réel
     let scoreUserOne = 0;
     let scoreUserTwo = 0;
+    const creatorId = match.creatorId.toString();
+    const joinerId = match.joinerId?.toString();
 
-    const fullMatch = await Match.findById(matchId)
-      .populate("creatorId")
-      .populate("joinerId");
-
-    fullMatch.questionsAsked.forEach((q) => {
+    match.questionsAsked.forEach((q) => {
       q.answers.forEach((a) => {
-        if (a.playerId.toString() === fullMatch.creatorId._id.toString()) {
-          scoreUserOne += a.score || 0;
-        } else if (
-          fullMatch.joinerId &&
-          a.playerId.toString() === fullMatch.joinerId._id.toString()
-        ) {
+        const playerId = a.playerId.toString();
+        if (playerId === creatorId) scoreUserOne += a.score || 0;
+        else if (joinerId && playerId === joinerId)
           scoreUserTwo += a.score || 0;
-        }
       });
     });
 
-    // ✅ Toujours envoyer le score mis à jour
+    // ✅ Émission du score mise à jour
     io.to(matchId).emit("score_updated", {
       matchId,
       scoreUserOne,
       scoreUserTwo,
     });
 
-    // ✅ Résultat de conversion uniquement si nécessaire
-    const prevQuestion = match.questionsAsked[match.questionsAsked.length - 2];
+    // ✅ Résultat de conversion
+    const prevQuestion = match.questionsAsked.at(-2);
     const isConversionPhase =
       prevQuestion &&
       prevQuestion.question.isConversion &&
@@ -369,20 +354,21 @@ io.on("connection", (socket) => {
         playerId: userId,
         success: isCorrect,
       });
+
       io.to(matchId).emit("score_updated", {
         matchId,
         scoreUserOne,
         scoreUserTwo,
       });
+
+      console.log("📤 Emission score_updated (conversion)");
     }
 
+    // ✅ Aller à la prochaine question
     const state = matchTimers.get(matchId);
-
     if (isCorrect && state?.handled === false) {
       clearTimeout(state.timer);
-
       matchTimers.set(matchId, { timer: null, handled: true });
-
       proceedToNextQuestion(matchId);
       return;
     }
