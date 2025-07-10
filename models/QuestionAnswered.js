@@ -11,6 +11,15 @@ const QuestionAnsweredSchema = new mongoose.Schema(
         required: true,
       },
       correctOption: { type: String, required: true },
+      isConversion: {
+        type: Boolean,
+        default: false,
+      },
+      conversionPlayerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
     },
 
     answers: [

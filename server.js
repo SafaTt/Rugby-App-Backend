@@ -62,7 +62,6 @@ io.on("connection", (socket) => {
 
   socket.on("join_match_room", (matchId, callback) => {
     socket.join(matchId);
-    console.log(`✅ Socket ${socket.id} joined room ${matchId}`);
     if (callback) callback(); // très important
   });
   const proceedToNextQuestion = async (matchId) => {
@@ -81,11 +80,23 @@ io.on("connection", (socket) => {
 
     const timerState = matchTimers.get(matchId);
     if (timerState?.pendingConversion) {
-      match.questionsAsked.push(timerState.pendingConversion);
+      const convQuestion = timerState.pendingConversion;
+
+      convQuestion.question.text = convQuestion.question.text || "MISSING_TEXT";
+      convQuestion.question.options = convQuestion.question.options || {};
+      convQuestion.question.correctOption =
+        convQuestion.question.correctOption || null;
+      convQuestion.question.isConversion = true;
+
+      match.questionsAsked.push(convQuestion);
+      console.log(
+        "✅ Question de conversion enregistrée :",
+        convQuestion.question
+      );
+
       await match.save();
       justInjectedConversion = true;
 
-      // Nettoyer
       if (timerState.timer) clearTimeout(timerState.timer);
       matchTimers.set(matchId, { handled: true });
     }
@@ -98,10 +109,6 @@ io.on("connection", (socket) => {
       io.to(matchId).emit("match_finished", { matchId });
       return;
     }
-    console.log(
-      "📤 Emission de next_question à tous les clients :",
-      next.question
-    );
     const formatted = Array.isArray(next.choices)
       ? next.choices.reduce((acc, choice, idx) => {
           const letters = ["A", "B", "C", "D"];
@@ -213,6 +220,13 @@ io.on("connection", (socket) => {
     }, 10000);
 
     matchTimers.set(matchId, { timer, handled: false });
+    match.questionsAsked.forEach((q, i) => {
+      console.log(
+        `- Q${i + 1}: ${q.question.text} | isConversion: ${
+          q.question.isConversion
+        }`
+      );
+    });
   };
 
   socket.on("match_joined", async (data) => {
@@ -349,11 +363,10 @@ io.on("connection", (socket) => {
     const state = matchTimers.get(matchId);
 
     if (isCorrect && state?.handled === false) {
-      console.log(
-        "✅ Bonne réponse reçue, passage immédiat à la question suivante"
-      );
       clearTimeout(state.timer);
+
       matchTimers.set(matchId, { timer: null, handled: true });
+
       proceedToNextQuestion(matchId);
       return;
     }
