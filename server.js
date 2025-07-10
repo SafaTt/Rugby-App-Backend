@@ -75,6 +75,10 @@ io.on("connection", (socket) => {
     const match = await Match.findById(matchId);
     if (!match || match.isFinished) return;
 
+    if (match.isFinished) {
+      console.log("⛔️ Match terminé, pas de nouvelle question envoyée.");
+      return;
+    }
     // 🔄 Vérifie si une conversion était en attente
     let justInjectedConversion = false;
 
@@ -165,7 +169,9 @@ io.on("connection", (socket) => {
         if (old?.timer) clearTimeout(old.timer);
       }
 
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
+        const refreshedMatch = await Match.findById(matchId);
+        if (refreshedMatch?.isFinished) return;
         const state = matchTimers.get(matchId);
         if (!state?.handled) {
           matchTimers.delete(matchId);
@@ -314,26 +320,16 @@ io.on("connection", (socket) => {
       lastQuestion.question.conversionPlayerId &&
       lastQuestion.question.conversionPlayerId.toString() === userId.toString();
 
-    // Calcul du score : 2 points pour conversion player correct, 4 points pour question normale correcte
     const scoreToAdd = isCorrect ? (isConversionPlayer ? 2 : 4) : 0;
 
-    lastQuestion.answers.push({ userId, selectedOption, score: scoreToAdd });
+    lastQuestion.answers.push({
+      userId: userId,
+      selectedOption,
+      score: scoreToAdd,
+    });
     await match.save();
 
-    // Correction ici : la conversion concerne la question précédente, pas la dernière
-    const prevQuestion = match.questionsAsked[match.questionsAsked.length - 2];
-    const isConversionPhase =
-      prevQuestion &&
-      prevQuestion.question.isConversion &&
-      prevQuestion.answers.length === 1;
-
-    if (isConversionPhase) {
-      io.to(matchId).emit("conversion_result", {
-        playerId: userId,
-        success: isCorrect,
-      });
-    }
-
+    // ✅ Calcul mis à jour AVANT l’emit
     let scoreUserOne = 0;
     let scoreUserTwo = 0;
 
@@ -354,11 +350,26 @@ io.on("connection", (socket) => {
       });
     });
 
+    // ✅ Toujours envoyer le score mis à jour
     io.to(matchId).emit("score_updated", {
       matchId,
       scoreUserOne,
       scoreUserTwo,
     });
+
+    // ✅ Résultat de conversion uniquement si nécessaire
+    const prevQuestion = match.questionsAsked[match.questionsAsked.length - 2];
+    const isConversionPhase =
+      prevQuestion &&
+      prevQuestion.question.isConversion &&
+      prevQuestion.answers.length === 1;
+
+    if (isConversionPhase) {
+      io.to(matchId).emit("conversion_result", {
+        playerId: userId,
+        success: isCorrect,
+      });
+    }
 
     const state = matchTimers.get(matchId);
 
