@@ -75,6 +75,10 @@ io.on("connection", (socket) => {
     const match = await Match.findById(matchId);
     if (!match || match.isFinished) return;
 
+    if (!match.quizStarted) {
+      console.log("🚫 Quiz pas encore démarré. Ignorer le timer.");
+      return;
+    }
     if (match.isFinished) {
       console.log("⛔️ Match terminé, pas de nouvelle question envoyée.");
       return;
@@ -295,7 +299,7 @@ io.on("connection", (socket) => {
         const state = matchTimers.get(matchId);
         if (!state?.handled) {
           matchTimers.delete(matchId);
-          proceedToNextQuestion(matchId);
+          // proceedToNextQuestion(matchId);
         }
       }, 10000);
 
@@ -358,17 +362,18 @@ io.on("connection", (socket) => {
     });
 
     // ✅ Résultat de conversion uniquement si nécessaire
-    const prevQuestion = match.questionsAsked[match.questionsAsked.length - 2];
-    const isConversionPhase =
-      prevQuestion &&
-      prevQuestion.question.isConversion &&
-      prevQuestion.answers.length === 1;
+    if (match.questionsAsked.length >= 2) {
+      const prevQuestion =
+        match.questionsAsked[match.questionsAsked.length - 2];
+      const isConversionPhase =
+        prevQuestion.question.isConversion && prevQuestion.answers.length === 1;
 
-    if (isConversionPhase) {
-      io.to(matchId).emit("conversion_result", {
-        playerId: userId,
-        success: isCorrect,
-      });
+      if (isConversionPhase) {
+        io.to(matchId).emit("conversion_result", {
+          playerId: userId,
+          success: isCorrect,
+        });
+      }
     }
 
     const state = matchTimers.get(matchId);
