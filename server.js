@@ -133,17 +133,20 @@ io.on("connection", (socket) => {
     let launchConversion = false;
     let playerIdToConvert = null;
 
-    if (previousQuestion && !justInjectedConversion) {
-      const correctAnswers = previousQuestion.answers.filter(
-        (a) => a.selectedOption === previousQuestion.question.correctOption
+    if (
+      previousQuestion &&
+      !justInjectedConversion &&
+      !previousQuestion.question.isConversion
+    ) {
+      const state = matchTimers.get(matchId);
+      console.log(
+        "🧠 firstCorrectPlayer dans matchTimers:",
+        state?.firstCorrectPlayer
       );
 
-      if (
-        correctAnswers.length === 1 &&
-        !previousQuestion.question.isConversion
-      ) {
+      if (state?.firstCorrectPlayer) {
         launchConversion = true;
-        playerIdToConvert = correctAnswers[0].playerId;
+        playerIdToConvert = state.firstCorrectPlayer;
       }
     }
 
@@ -381,7 +384,14 @@ io.on("connection", (socket) => {
     if (isCorrect && state?.handled === false) {
       clearTimeout(state.timer);
 
-      matchTimers.set(matchId, { timer: null, handled: true });
+      const updatedState = {
+        ...(state || {}),
+        timer: null,
+        handled: true,
+        firstCorrectPlayer: userId,
+      };
+
+      matchTimers.set(matchId, updatedState);
 
       proceedToNextQuestion(matchId);
       return;
