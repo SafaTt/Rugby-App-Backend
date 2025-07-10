@@ -66,6 +66,13 @@ io.on("connection", (socket) => {
     if (callback) callback(); // très important
   });
   const proceedToNextQuestion = async (matchId) => {
+    const currentState = matchTimers.get(matchId);
+    if (currentState?.handled) {
+      console.log(
+        "⏭️ Question déjà gérée, on ne relance pas proceedToNextQuestion"
+      );
+      return;
+    }
     const match = await Match.findById(matchId);
     if (!match || match.isFinished) return;
 
@@ -91,7 +98,10 @@ io.on("connection", (socket) => {
       io.to(matchId).emit("match_finished", { matchId });
       return;
     }
-
+    console.log(
+      "📤 Emission de next_question à tous les clients :",
+      next.question
+    );
     const formatted = Array.isArray(next.choices)
       ? next.choices.reduce((acc, choice, idx) => {
           const letters = ["A", "B", "C", "D"];
@@ -156,20 +166,23 @@ io.on("connection", (socket) => {
         }
       }, 10000);
 
-      matchTimers.set(matchId, {
-        timer,
-        handled: false,
-        pendingConversion: {
-          question: {
-            text: next.question,
-            options: formatted,
-            correctOption: next.correctAnswer,
-            isConversion: true,
-            conversionPlayerId: playerIdToConvert,
+      const current = matchTimers.get(matchId);
+      if (!current?.handled) {
+        matchTimers.set(matchId, {
+          timer,
+          handled: false,
+          pendingConversion: {
+            question: {
+              text: next.question,
+              options: formatted,
+              correctOption: next.correctAnswer,
+              isConversion: true,
+              conversionPlayerId: playerIdToConvert,
+            },
+            answers: [],
           },
-          answers: [],
-        },
-      });
+        });
+      }
 
       return;
     }
@@ -334,10 +347,15 @@ io.on("connection", (socket) => {
     });
 
     const state = matchTimers.get(matchId);
-    if (state && !state.handled) {
+
+    if (isCorrect && state?.handled === false) {
+      console.log(
+        "✅ Bonne réponse reçue, passage immédiat à la question suivante"
+      );
       clearTimeout(state.timer);
       matchTimers.set(matchId, { timer: null, handled: true });
       proceedToNextQuestion(matchId);
+      return;
     }
   });
 
