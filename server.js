@@ -65,6 +65,8 @@ io.on("connection", (socket) => {
     if (callback) callback(); // très important
   });
   const proceedToNextQuestion = async (matchId) => {
+    console.log(`⏩ proceedToNextQuestion appelé pour matchId=${matchId}`);
+
     const currentState = matchTimers.get(matchId);
     if (currentState?.handled) {
       console.log(
@@ -106,7 +108,11 @@ io.on("connection", (socket) => {
       justInjectedConversion = true;
 
       if (timerState.timer) clearTimeout(timerState.timer);
-      matchTimers.set(matchId, { handled: true });
+      matchTimers.set(matchId, {
+        ...timerState,
+        handled: true,
+        pendingConversion: null,
+      });
     }
 
     // 🎯 Nouvelle question
@@ -359,6 +365,11 @@ io.on("connection", (socket) => {
 
       // 🎯 Résultat de la conversion
       if (isConversion && isConversionPlayer) {
+        console.log(
+          "🎯 Réponse à une question de conversion reçue, résultat:",
+          isCorrect
+        );
+
         io.to(matchId).emit("conversion_result", {
           playerId: userId,
           success: isCorrect,
@@ -368,6 +379,17 @@ io.on("connection", (socket) => {
         });
       }
 
+      // ✅ Fix ici
+      const current = matchTimers.get(matchId);
+      if (current) {
+        matchTimers.set(matchId, { ...current, handled: false });
+      }
+      // Passer à la question suivante après un petit délai
+      setTimeout(() => {
+        console.log("⏭️ Passage à la question suivante après conversion");
+
+        proceedToNextQuestion(matchId);
+      }, 1500);
       // 🧮 Calcul des scores
       let scoreUserOne = 0;
       let scoreUserTwo = 0;
