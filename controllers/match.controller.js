@@ -530,6 +530,28 @@ const finishMatch = async (req, res) => {
   }
 };
 
+const cancelMatch = async (req, res) => {
+  const { matchId } = req.params;
+
+  try {
+    // Trouver le match par id et mettre à jour son status
+    const updatedMatch = await Match.findByIdAndUpdate(
+      matchId,
+      { status: "cancelled" },
+      { new: true }
+    );
+
+    if (!updatedMatch) {
+      return res.status(404).json({ message: "Match not found" });
+    }
+
+    return res.status(200).json(updatedMatch);
+  } catch (error) {
+    console.error("Error cancelling match:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
 module.exports = {
   createMatch,
   joinMatch,
@@ -543,4 +565,5 @@ module.exports = {
   getQuiz,
   getNextQuestion,
   finishMatch,
+  cancelMatch,
 };

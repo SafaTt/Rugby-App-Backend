@@ -363,7 +363,6 @@ io.on("connection", (socket) => {
         answeredAt: new Date(),
       });
 
-      // 🎯 Résultat de la conversion
       if (isConversion && isConversionPlayer) {
         console.log(
           "🎯 Réponse à une question de conversion reçue, résultat:",
@@ -377,19 +376,134 @@ io.on("connection", (socket) => {
             ? "CONVERSION SUCCESSFUL"
             : "CONVERSION UNSUCCESSFUL",
         });
+
+        // ✅ Clear le timer
+        const state = matchTimers.get(matchId);
+        if (state) {
+          matchTimers.set(matchId, {
+            ...state,
+            handled: false,
+            firstCorrectPlayer: null,
+          });
+        }
+
+        // ✅ Passer à la question suivante SEULEMENT après réponse du joueur
+        setTimeout(async () => {
+          console.log(
+            "⏭️ Passage à la question normale après réponse à la conversion"
+          );
+
+          const updatedMatch = await Match.findById(matchId);
+          if (!updatedMatch) return;
+
+          const nextIndex = updatedMatch.questionsAsked.length;
+          if (nextIndex >= Quizz.length) {
+            updatedMatch.isFinished = true;
+            await updatedMatch.save();
+
+            io.to(matchId).emit("match_finished", {
+              message: "Le quiz est terminé ! Merci d’avoir joué.",
+            });
+            return;
+          }
+
+          const nextQ = Quizz[nextIndex];
+          const formattedOptions = Array.isArray(nextQ.choices)
+            ? nextQ.choices.reduce((acc, choice, idx) => {
+                const letters = ["A", "B", "C", "D"];
+                acc[letters[idx]] = choice;
+                return acc;
+              }, {})
+            : nextQ.choices;
+
+          updatedMatch.questionsAsked.push({
+            question: {
+              text: nextQ.question,
+              options: formattedOptions,
+              correctOption: nextQ.correctAnswer,
+              isConversion: nextQ.isConversion || false,
+            },
+            answers: [],
+          });
+
+          updatedMatch.hasConversionStarted = false;
+          updatedMatch.conversionBy = null;
+
+          await updatedMatch.save();
+
+          io.to(matchId).emit("next_question", {
+            question: {
+              text: nextQ.question,
+              choices: formattedOptions,
+              correctAnswer: nextQ.correctAnswer,
+            },
+          });
+        }, 12000);
+
+        return; // ❌ ne pas continuer plus loin
       }
 
-      // ✅ Fix ici
-      const current = matchTimers.get(matchId);
-      if (current) {
-        matchTimers.set(matchId, { ...current, handled: false });
+      // ✅ Clear firstCorrectPlayer après la conversion
+      const state = matchTimers.get(matchId);
+      if (state) {
+        matchTimers.set(matchId, {
+          ...state,
+          handled: false,
+          firstCorrectPlayer: null,
+        });
       }
+
       // Passer à la question suivante après un petit délai
-      setTimeout(() => {
-        console.log("⏭️ Passage à la question suivante après conversion");
+      setTimeout(async () => {
+        console.log("⏭️ Passage à la question normale après conversion");
 
-        proceedToNextQuestion(matchId);
-      }, 1500);
+        const updatedMatch = await Match.findById(matchId);
+        if (!updatedMatch) return;
+
+        const nextIndex = updatedMatch.questionsAsked.length;
+        if (nextIndex >= Quizz.length) {
+          updatedMatch.isFinished = true;
+          await updatedMatch.save();
+
+          io.to(matchId).emit("match_finished", {
+            message: "Le quiz est terminé ! Merci d’avoir joué.",
+          });
+          return;
+        }
+
+        const nextQ = Quizz[nextIndex];
+        const formattedOptions = Array.isArray(nextQ.choices)
+          ? nextQ.choices.reduce((acc, choice, idx) => {
+              const letters = ["A", "B", "C", "D"];
+              acc[letters[idx]] = choice;
+              return acc;
+            }, {})
+          : nextQ.choices;
+
+        updatedMatch.questionsAsked.push({
+          question: {
+            text: nextQ.question,
+            options: formattedOptions,
+            correctOption: nextQ.correctAnswer,
+            isConversion: nextQ.isConversion || false,
+          },
+          answers: [],
+        });
+
+        updatedMatch.hasConversionStarted = false;
+        updatedMatch.conversionBy = null;
+
+        await updatedMatch.save();
+
+        io.to(matchId).emit("next_question", {
+          question: {
+            text: nextQ.question,
+            choices: formattedOptions,
+            correctAnswer: nextQ.correctAnswer,
+          },
+        });
+      }, 10000);
+
       // 🧮 Calcul des scores
       let scoreUserOne = 0;
       let scoreUserTwo = 0;
@@ -560,14 +674,6 @@ io.on("connection", (socket) => {
         correctAnswer: firstQuestion.question.correctOption,
       },
     });
-
-    const timer = setTimeout(() => {
-      const state = matchTimers.get(matchId);
-      if (!state?.handled) {
-        matchTimers.delete(matchId);
-        proceedToNextQuestion(matchId);
-      }
-    }, 10000);
 
     matchTimers.set(matchId, { timer, handled: false });
   });

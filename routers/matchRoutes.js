@@ -35,5 +35,6 @@ router.get("/quiz", matchController.getQuiz);
 router.get("/:id/next-question", matchController.getNextQuestion);
 // routes/matchRoutes.ts
 router.patch("/:matchId/finish", matchController.finishMatch);
+router.patch("/cancel/:matchId", matchController.cancelMatch);
 
 module.exports = router;
