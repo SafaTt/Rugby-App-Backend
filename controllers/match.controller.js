@@ -174,6 +174,8 @@ const cancelOldPendingMatches = async () => {
 // with kick at goal
 const updateMatchWithQuestion = async (req, res) => {
   try {
+    const io = req.app.get("io");
+
     const matchId = req.params.id;
     const userId = req.user._id;
     const { question, selectedOption } = req.body;
@@ -271,7 +273,16 @@ const updateMatchWithQuestion = async (req, res) => {
         },
       }
     );
-
+    if (io) {
+      io.to(matchId.toString()).emit("answer_question", {
+        matchId,
+        playerId: userId,
+        questionText: question.text,
+        selectedOption,
+        isCorrect,
+        answeredAt,
+      });
+    }
     // Récupère match à jour
     match = await Match.findById(matchId);
 
@@ -309,7 +320,6 @@ const updateMatchWithQuestion = async (req, res) => {
     }
 
     const currentQ = match.questionsAsked[updatedQIndex];
-    const io = req.app.get("io");
 
     if (currentQ.answers.length >= 2) {
       const nextIndex = match.questionsAsked.length;
