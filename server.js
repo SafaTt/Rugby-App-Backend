@@ -45,7 +45,6 @@ mongoose
 app.get("/", (req, res) => {
   res.send("Welcome to the backend!");
 });
-// 🔗 Rendre io accessible dans les controllers
 app.set("io", io);
 
 const getRandomQuestion = (quizzList, alreadyAsked) => {
@@ -700,12 +699,8 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(1234, () => {
-  console.log("🚀 Server is running on port 1234");
-});
-
 // Start the server
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`Server running on port ${port}`);
   // Lancer le nettoyeur de matchs en attente
   // startMatchCleaner();
