@@ -335,13 +335,13 @@ io.on("connection", (socket) => {
 
       const isCorrect = selectedOption === lastQuestion.question.correctOption;
       const isConversion = lastQuestion.question.isConversion === true;
-      const conversionPlayerId = lastQuestion.question.conversionPlayerId;
       const isConversionPlayer =
-        isConversion && conversionPlayerId?.toString() === userId.toString();
+        isConversion &&
+        lastQuestion.question.conversionPlayerId?.toString() ===
+          userId.toString();
 
-      const scoreToAdd = isCorrect ? (isConversionPlayer ? 2 : 4) : 0;
+      const scoreToAdd = isCorrect ? (isConversion ? 2 : 4) : 0;
 
-      // Ajout de la réponse
       lastQuestion.answers.push({
         playerId: userId,
         selectedOption,
@@ -352,7 +352,6 @@ io.on("connection", (socket) => {
 
       await match.save();
 
-      // ⚡ Notifie tous les clients qu’un joueur a répondu
       io.to(matchId).emit("answer_question", {
         matchId,
         playerId: userId,
@@ -362,12 +361,35 @@ io.on("connection", (socket) => {
         answeredAt: new Date(),
       });
 
-      if (isConversion && isConversionPlayer) {
-        console.log(
-          "🎯 Réponse à une question de conversion reçue, résultat:",
-          isCorrect
-        );
+      // 🧮 Calcul et MAJ des scores EN TEMPS RÉEL
+      const freshMatch = await Match.findById(matchId)
+        .populate("creatorId")
+        .populate("joinerId");
 
+      let scoreUserOne = 0;
+      let scoreUserTwo = 0;
+
+      freshMatch.questionsAsked.forEach((q) => {
+        q.answers.forEach((a) => {
+          if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
+            scoreUserOne += a.score || 0;
+          } else if (
+            freshMatch.joinerId &&
+            a.playerId.toString() === freshMatch.joinerId._id.toString()
+          ) {
+            scoreUserTwo += a.score || 0;
+          }
+        });
+      });
+
+      io.to(matchId).emit("score_updated", {
+        matchId,
+        scoreUserOne,
+        scoreUserTwo,
+      });
+
+      // ✅ Si c'était une conversion : afficher résultat + passer à la suite
+      if (isConversion && isConversionPlayer) {
         io.to(matchId).emit("conversion_result", {
           playerId: userId,
           success: isCorrect,
@@ -376,30 +398,12 @@ io.on("connection", (socket) => {
             : "CONVERSION UNSUCCESSFUL",
         });
 
-        // ✅ Clear le timer
-        const state = matchTimers.get(matchId);
-        if (state) {
-          matchTimers.set(matchId, {
-            ...state,
-            handled: false,
-            firstCorrectPlayer: null,
-          });
-        }
-
-        // ✅ Passer à la question suivante SEULEMENT après réponse du joueur
         setTimeout(async () => {
-          console.log(
-            "⏭️ Passage à la question normale après réponse à la conversion"
-          );
-
           const updatedMatch = await Match.findById(matchId);
-          if (!updatedMatch) return;
-
           const nextIndex = updatedMatch.questionsAsked.length;
           if (nextIndex >= Quizz.length) {
             updatedMatch.isFinished = true;
             await updatedMatch.save();
-
             io.to(matchId).emit("match_finished", {
               message: "Le quiz est terminé ! Merci d’avoir joué.",
             });
@@ -425,9 +429,6 @@ io.on("connection", (socket) => {
             answers: [],
           });
 
-          updatedMatch.hasConversionStarted = false;
-          updatedMatch.conversionBy = null;
-
           await updatedMatch.save();
 
           io.to(matchId).emit("next_question", {
@@ -437,159 +438,67 @@ io.on("connection", (socket) => {
               correctAnswer: nextQ.correctAnswer,
             },
           });
-        }, 12000);
+        }, 4000);
 
-        return; // ❌ ne pas continuer plus loin
+        return; // important
       }
 
-      // ✅ Clear firstCorrectPlayer après la conversion
-      const state = matchTimers.get(matchId);
-      if (state) {
-        matchTimers.set(matchId, {
-          ...state,
-          handled: false,
-          firstCorrectPlayer: null,
-        });
-      }
+      // ✅ Si réponse correcte → proposer une CONVERSION
+      if (isCorrect && !isConversion) {
+        const convQ =
+          Quizz.find((q) => q.isConversion) ||
+          Quizz[Math.floor(Math.random() * Quizz.length)];
 
-      // Passer à la question suivante après un petit délai
-      setTimeout(async () => {
-        console.log("⏭️ Passage à la question normale après conversion");
-
-        const updatedMatch = await Match.findById(matchId);
-        if (!updatedMatch) return;
-
-        const nextIndex = updatedMatch.questionsAsked.length;
-        if (nextIndex >= Quizz.length) {
-          updatedMatch.isFinished = true;
-          await updatedMatch.save();
-
-          io.to(matchId).emit("match_finished", {
-            message: "Le quiz est terminé ! Merci d’avoir joué.",
-          });
-          return;
-        }
-
-        const nextQ = Quizz[nextIndex];
-        const formattedOptions = Array.isArray(nextQ.choices)
-          ? nextQ.choices.reduce((acc, choice, idx) => {
+        const formattedConvOptions = Array.isArray(convQ.choices)
+          ? convQ.choices.reduce((acc, choice, idx) => {
               const letters = ["A", "B", "C", "D"];
               acc[letters[idx]] = choice;
               return acc;
             }, {})
-          : nextQ.choices;
+          : convQ.choices;
 
-        updatedMatch.questionsAsked.push({
+        match.questionsAsked.push({
           question: {
-            text: nextQ.question,
-            options: formattedOptions,
-            correctOption: nextQ.correctAnswer,
-            isConversion: nextQ.isConversion || false,
+            text: convQ.question,
+            options: formattedConvOptions,
+            correctOption: convQ.correctAnswer,
+            isConversion: true,
+            conversionPlayerId: userId,
           },
           answers: [],
         });
 
-        updatedMatch.hasConversionStarted = false;
-        updatedMatch.conversionBy = null;
+        await match.save();
 
-        await updatedMatch.save();
-
-        io.to(matchId).emit("next_question", {
+        io.to(matchId).emit("conversion_question", {
+          playerId: userId,
           question: {
-            text: nextQ.question,
-            choices: formattedOptions,
-            correctAnswer: nextQ.correctAnswer,
+            text: convQ.question,
+            choices: formattedConvOptions,
+            correctAnswer: convQ.correctAnswer,
           },
         });
-      }, 10000);
 
-      // 🧮 Calcul des scores
-      let scoreUserOne = 0;
-      let scoreUserTwo = 0;
-
-      match.questionsAsked.forEach((q) => {
-        q.answers.forEach((a) => {
-          if (a.playerId.toString() === match.creatorId._id.toString()) {
-            scoreUserOne += a.score || 0;
-          } else if (
-            match.joinerId &&
-            a.playerId.toString() === match.joinerId._id.toString()
-          ) {
-            scoreUserTwo += a.score || 0;
-          }
-        });
-      });
-
-      io.to(matchId).emit("score_updated", {
-        matchId,
-        scoreUserOne,
-        scoreUserTwo,
-      });
-
-      // 🔁 Conversion trigger
-      if (!match.hasConversionStarted && !match.conversionBy) {
-        let teamToConvert = null;
-
-        if (scoreUserOne === 4) {
-          teamToConvert = "playerOne";
-        } else if (scoreUserTwo === 4) {
-          teamToConvert = "playerTwo";
-        }
-
-        if (teamToConvert) {
-          const convQ =
-            Quizz.find((q) => q.isConversion) ||
-            Quizz[Math.floor(Math.random() * Quizz.length)];
-
-          const formattedConvOptions = Array.isArray(convQ.choices)
-            ? convQ.choices.reduce((acc, choice, idx) => {
-                const letters = ["A", "B", "C", "D"];
-                acc[letters[idx]] = choice;
-                return acc;
-              }, {})
-            : convQ.choices;
-
-          match.hasConversionStarted = true;
-          match.conversionBy = teamToConvert;
-
-          match.questionsAsked.push({
-            question: {
-              text: convQ.question,
-              options: formattedConvOptions,
-              correctOption: convQ.correctAnswer,
-              isConversion: true,
-              conversionPlayerId:
-                teamToConvert === "playerOne"
-                  ? match.creatorId._id
-                  : match.joinerId._id,
-            },
-            answers: [],
-          });
-
-          await match.save();
-
-          io.to(matchId).emit("conversion_question", {
-            playerId:
-              teamToConvert === "playerOne"
-                ? match.creatorId._id
-                : match.joinerId._id,
-            matchId,
-            question: {
-              text: convQ.question,
-              choices: formattedConvOptions,
-              correctAnswer: convQ.correctAnswer,
-            },
-          });
-
-          return;
-        }
+        return; // attendre la conversion
       }
 
-      // ⏭️ Passage à la prochaine question si 2 réponses
-      if (lastQuestion.answers.length >= 2) {
-        const nextIndex = match.questionsAsked.length;
+      // ✅ Si tous les joueurs ont répondu → passer à la prochaine question
+      const totalAnswers = lastQuestion.answers.length;
+      const playersCount = match.joinerId ? 2 : 1;
 
-        if (nextIndex < Quizz.length) {
+      if (totalAnswers >= playersCount) {
+        setTimeout(async () => {
+          const updatedMatch = await Match.findById(matchId);
+          const nextIndex = updatedMatch.questionsAsked.length;
+          if (nextIndex >= Quizz.length) {
+            updatedMatch.isFinished = true;
+            await updatedMatch.save();
+            io.to(matchId).emit("match_finished", {
+              message: "Le quiz est terminé ! Merci d’avoir joué.",
+            });
+            return;
+          }
+
           const nextQ = Quizz[nextIndex];
           const formattedOptions = Array.isArray(nextQ.choices)
             ? nextQ.choices.reduce((acc, choice, idx) => {
@@ -599,7 +508,7 @@ io.on("connection", (socket) => {
               }, {})
             : nextQ.choices;
 
-          match.questionsAsked.push({
+          updatedMatch.questionsAsked.push({
             question: {
               text: nextQ.question,
               options: formattedOptions,
@@ -609,7 +518,7 @@ io.on("connection", (socket) => {
             answers: [],
           });
 
-          await match.save();
+          await updatedMatch.save();
 
           io.to(matchId).emit("next_question", {
             question: {
@@ -618,14 +527,7 @@ io.on("connection", (socket) => {
               correctAnswer: nextQ.correctAnswer,
             },
           });
-        } else {
-          match.isFinished = true;
-          await match.save();
-
-          io.to(matchId).emit("match_finished", {
-            message: "Le quiz est terminé ! Merci d’avoir joué.",
-          });
-        }
+        }, 3000);
       }
     } catch (error) {
       console.error("❌ Erreur socket answer_question:", error);
