@@ -443,43 +443,52 @@ io.on("connection", (socket) => {
         return; // important
       }
 
-      // ✅ Si réponse correcte → proposer une CONVERSION
+      // ✅ Notifier uniquement les bonnes réponses (hors conversion)
       if (isCorrect && !isConversion) {
-        const convQ =
-          Quizz.find((q) => q.isConversion) ||
-          Quizz[Math.floor(Math.random() * Quizz.length)];
-
-        const formattedConvOptions = Array.isArray(convQ.choices)
-          ? convQ.choices.reduce((acc, choice, idx) => {
-              const letters = ["A", "B", "C", "D"];
-              acc[letters[idx]] = choice;
-              return acc;
-            }, {})
-          : convQ.choices;
-
-        match.questionsAsked.push({
-          question: {
-            text: convQ.question,
-            options: formattedConvOptions,
-            correctOption: convQ.correctAnswer,
-            isConversion: true,
-            conversionPlayerId: userId,
-          },
-          answers: [],
-        });
-
-        await match.save();
-
-        io.to(matchId).emit("conversion_question", {
+        // ✅ Étape 1 : notifier la bonne réponse
+        io.to(matchId).emit("correct_answer_received", {
           playerId: userId,
-          question: {
-            text: convQ.question,
-            choices: formattedConvOptions,
-            correctAnswer: convQ.correctAnswer,
-          },
+          message: "Correct answer!",
         });
 
-        return; // attendre la conversion
+        // ✅ Étape 2 : attendre 2 secondes AVANT d'envoyer la conversion
+        setTimeout(async () => {
+          const convQ =
+            Quizz.find((q) => q.isConversion) ||
+            Quizz[Math.floor(Math.random() * Quizz.length)];
+
+          const formattedConvOptions = Array.isArray(convQ.choices)
+            ? convQ.choices.reduce((acc, choice, idx) => {
+                const letters = ["A", "B", "C", "D"];
+                acc[letters[idx]] = choice;
+                return acc;
+              }, {})
+            : convQ.choices;
+
+          match.questionsAsked.push({
+            question: {
+              text: convQ.question,
+              options: formattedConvOptions,
+              correctOption: convQ.correctAnswer,
+              isConversion: true,
+              conversionPlayerId: userId,
+            },
+            answers: [],
+          });
+
+          await match.save();
+
+          io.to(matchId).emit("conversion_question", {
+            playerId: userId,
+            question: {
+              text: convQ.question,
+              choices: formattedConvOptions,
+              correctAnswer: convQ.correctAnswer,
+            },
+          });
+        }, 2000); // ⏱️ délai de 2 secondes
+
+        return;
       }
 
       // ✅ Si tous les joueurs ont répondu → passer à la prochaine question
@@ -604,6 +613,4 @@ io.on("connection", (socket) => {
 // Start the server
 server.listen(port, () => {
   console.log(`Server running on port ${port}`);
-  // Lancer le nettoyeur de matchs en attente
-  // startMatchCleaner();
 });
