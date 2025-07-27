@@ -57,6 +57,15 @@ const matchSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    halfTimeTriggered: {
+      type: Boolean,
+      default: false,
+    },
+    leaverId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   { timestamps: true }
 );

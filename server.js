@@ -56,13 +56,68 @@ const getRandomQuestion = (quizzList, alreadyAsked) => {
   return notAsked[index];
 };
 
+function sendNextQuestion(match, matchId, nextIndex) {
+  const totalQuestions = Quizz.length;
+
+  if (nextIndex >= totalQuestions) {
+    match.isFinished = true;
+    match.save().then(() => {
+      io.to(matchId).emit("match_finished", {
+        message: "Le quiz est terminé ! Merci d’avoir joué.",
+      });
+    });
+    return;
+  }
+
+  const nextQ = Quizz[nextIndex];
+  const formattedOptions = Array.isArray(nextQ.choices)
+    ? nextQ.choices.reduce((acc, choice, idx) => {
+        const letters = ["A", "B", "C", "D"];
+        acc[letters[idx]] = choice;
+        return acc;
+      }, {})
+    : nextQ.choices;
+
+  match.questionsAsked.push({
+    question: {
+      text: nextQ.question,
+      options: formattedOptions,
+      correctOption: nextQ.correctAnswer,
+      isConversion: nextQ.isConversion || false,
+    },
+    answers: [],
+  });
+
+  match.save().then(() => {
+    io.to(matchId).emit("next_question", {
+      question: {
+        text: nextQ.question,
+        choices: formattedOptions,
+        correctAnswer: nextQ.correctAnswer,
+      },
+    });
+  });
+}
+
 io.on("connection", (socket) => {
   console.log("✅ New client connected");
 
+  const markHandled = (matchId) => {
+    const current = matchTimers.get(matchId);
+    if (current) {
+      console.log(`🔒 handled=true pour matchId=${matchId}`);
+      matchTimers.set(matchId, {
+        ...current,
+        handled: true,
+      });
+    }
+  };
+
   socket.on("join_match_room", (matchId, callback) => {
     socket.join(matchId);
-    if (callback) callback(); // très important
+    if (callback) callback();
   });
+
   const proceedToNextQuestion = async (matchId) => {
     console.log(`⏩ proceedToNextQuestion appelé pour matchId=${matchId}`);
 
@@ -73,21 +128,15 @@ io.on("connection", (socket) => {
       );
       return;
     }
+
     const match = await Match.findById(matchId);
-    if (!match || match.isFinished) return;
+    if (!match || match.isFinished || match.leaverId || !match.quizStarted)
+      return;
 
-    if (!match.quizStarted) {
-      console.log("🚫 Quiz pas encore démarré. Ignorer le timer.");
-      return;
-    }
-    if (match.isFinished) {
-      console.log("⛔️ Match terminé, pas de nouvelle question envoyée.");
-      return;
-    }
-    // 🔄 Vérifie si une conversion était en attente
     let justInjectedConversion = false;
-
     const timerState = matchTimers.get(matchId);
+
+    // 👉 Conversion en attente ?
     if (timerState?.pendingConversion) {
       const convQuestion = timerState.pendingConversion;
 
@@ -98,11 +147,6 @@ io.on("connection", (socket) => {
       convQuestion.question.isConversion = true;
 
       match.questionsAsked.push(convQuestion);
-      console.log(
-        "✅ Question de conversion enregistrée :",
-        convQuestion.question
-      );
-
       await match.save();
       justInjectedConversion = true;
 
@@ -112,9 +156,12 @@ io.on("connection", (socket) => {
         handled: true,
         pendingConversion: null,
       });
+
+      console.log("🔁 Conversion injectée par timeout");
+      // 👉 On continue vers la question suivante juste après
     }
 
-    // 🎯 Nouvelle question
+    // 👉 Question normale suivante
     const next = getRandomQuestion(Quizz, match.questionsAsked);
     if (!next) {
       match.isFinished = true;
@@ -122,6 +169,7 @@ io.on("connection", (socket) => {
       io.to(matchId).emit("match_finished", { matchId });
       return;
     }
+
     const formatted = Array.isArray(next.choices)
       ? next.choices.reduce((acc, choice, idx) => {
           const letters = ["A", "B", "C", "D"];
@@ -130,7 +178,6 @@ io.on("connection", (socket) => {
         }, {})
       : next.choices;
 
-    // 🔍 Analyse dernière question (pas de conversion enchaînée)
     const lastQuestionIndex = match.questionsAsked.length - 1;
     const previousQuestion =
       lastQuestionIndex >= 0 ? match.questionsAsked[lastQuestionIndex] : null;
@@ -144,11 +191,6 @@ io.on("connection", (socket) => {
       !previousQuestion.question.isConversion
     ) {
       const state = matchTimers.get(matchId);
-      console.log(
-        "🧠 firstCorrectPlayer dans matchTimers:",
-        state?.firstCorrectPlayer
-      );
-
       if (state?.firstCorrectPlayer) {
         launchConversion = true;
         playerIdToConvert = state.firstCorrectPlayer;
@@ -186,33 +228,33 @@ io.on("connection", (socket) => {
         if (refreshedMatch?.isFinished) return;
         const state = matchTimers.get(matchId);
         if (!state?.handled) {
-          matchTimers.delete(matchId);
+          console.log(
+            "⏱️ Timeout conversion : aucune réponse → passer à la question suivante"
+          );
+          markHandled(matchId);
           proceedToNextQuestion(matchId);
         }
       }, 10000);
 
-      const current = matchTimers.get(matchId);
-      if (!current?.handled) {
-        matchTimers.set(matchId, {
-          timer,
-          handled: false,
-          pendingConversion: {
-            question: {
-              text: next.question,
-              options: formatted,
-              correctOption: next.correctAnswer,
-              isConversion: true,
-              conversionPlayerId: playerIdToConvert,
-            },
-            answers: [],
+      matchTimers.set(matchId, {
+        timer,
+        handled: false,
+        pendingConversion: {
+          question: {
+            text: next.question,
+            options: formatted,
+            correctOption: next.correctAnswer,
+            isConversion: true,
+            conversionPlayerId: playerIdToConvert,
           },
-        });
-      }
+          answers: [],
+        },
+      });
 
-      return;
+      return; // ⛔ On attend la conversion avant d'envoyer une autre question normale
     }
 
-    // Question normale
+    // ✅ Question normale
     match.questionsAsked.push(newQuestion);
     await match.save();
 
@@ -232,19 +274,15 @@ io.on("connection", (socket) => {
     const timer = setTimeout(() => {
       const state = matchTimers.get(matchId);
       if (!state?.handled) {
-        matchTimers.delete(matchId);
+        console.log(
+          "⏱️ Timeout question normale : aucune réponse → passer à la suivante"
+        );
+        markHandled(matchId);
         proceedToNextQuestion(matchId);
       }
     }, 10000);
 
     matchTimers.set(matchId, { timer, handled: false });
-    match.questionsAsked.forEach((q, i) => {
-      console.log(
-        `- Q${i + 1}: ${q.question.text} | isConversion: ${
-          q.question.isConversion
-        }`
-      );
-    });
   };
 
   socket.on("match_joined", async (data) => {
@@ -308,8 +346,7 @@ io.on("connection", (socket) => {
       const timer = setTimeout(() => {
         const state = matchTimers.get(matchId);
         if (!state?.handled) {
-          matchTimers.delete(matchId);
-          // proceedToNextQuestion(matchId);
+          proceedToNextQuestion(matchId);
         }
       }, 10000);
 
@@ -352,6 +389,17 @@ io.on("connection", (socket) => {
 
       await match.save();
 
+      // Marquer la question comme "handled" pour éviter que le timer relance
+      const currentTimerState = matchTimers.get(matchId);
+      if (currentTimerState && !currentTimerState.handled) {
+        matchTimers.set(matchId, {
+          ...currentTimerState,
+          handled: true,
+        });
+        console.log(
+          `🔒 Question marquée comme handled pour matchId=${matchId} car réponse reçue`
+        );
+      }
       io.to(matchId).emit("answer_question", {
         matchId,
         playerId: userId,
@@ -390,12 +438,16 @@ io.on("connection", (socket) => {
 
       // ✅ Si c'était une conversion : afficher résultat + passer à la suite
       if (isConversion && isConversionPlayer) {
+        const teamTitle =
+          userId.toString() === match.creatorId.toString()
+            ? match.playerOneTeam.title
+            : match.playerTwoTeam?.title || "Team";
         io.to(matchId).emit("conversion_result", {
           playerId: userId,
           success: isCorrect,
           message: isCorrect
-            ? "CONVERSION SUCCESSFUL"
-            : "CONVERSION UNSUCCESSFUL",
+            ? `${teamTitle} CONVERSION SUCCESSFUL`
+            : `${teamTitle} CONVERSION UNSUCCESSFUL`,
         });
 
         setTimeout(async () => {
@@ -445,10 +497,16 @@ io.on("connection", (socket) => {
 
       // ✅ Notifier uniquement les bonnes réponses (hors conversion)
       if (isCorrect && !isConversion) {
+        // Etape 0 :  détecter le team name
+        const teamTitle =
+          userId.toString() === match.creatorId.toString()
+            ? match.playerOneTeam.title
+            : match.playerTwoTeam?.title || "Team";
+
         // ✅ Étape 1 : notifier la bonne réponse
         io.to(matchId).emit("correct_answer_received", {
           playerId: userId,
-          message: "Correct answer!",
+          message: `Try ${teamTitle} !`,
         });
 
         // ✅ Étape 2 : attendre 2 secondes AVANT d'envoyer la conversion
@@ -486,7 +544,7 @@ io.on("connection", (socket) => {
               correctAnswer: convQ.correctAnswer,
             },
           });
-        }, 2000); // ⏱️ délai de 2 secondes
+        }, 500); // ⏱️ délai de 2 secondes
 
         return;
       }
@@ -499,43 +557,29 @@ io.on("connection", (socket) => {
         setTimeout(async () => {
           const updatedMatch = await Match.findById(matchId);
           const nextIndex = updatedMatch.questionsAsked.length;
-          if (nextIndex >= Quizz.length) {
-            updatedMatch.isFinished = true;
+          const totalQuestions = Quizz.length;
+
+          // ✅ Si on est à la moitié et pas encore déclenché
+          const isHalfTime =
+            !updatedMatch.halfTimeTriggered &&
+            nextIndex >= Math.floor(totalQuestions / 2);
+
+          if (isHalfTime) {
+            updatedMatch.halfTimeTriggered = true;
             await updatedMatch.save();
-            io.to(matchId).emit("match_finished", {
-              message: "Le quiz est terminé ! Merci d’avoir joué.",
+
+            // 🔥 Diffuse "HALF-TIME" aux joueurs
+            io.to(matchId).emit("half_time", {
+              message: "⏸️ HALF-TIME! Quick break!",
             });
-            return;
+
+            // ⏱️ Pause de 5 secondes avant de continuer
+            setTimeout(() => {
+              sendNextQuestion(updatedMatch, matchId, nextIndex);
+            }, 5000);
+          } else {
+            sendNextQuestion(updatedMatch, matchId, nextIndex);
           }
-
-          const nextQ = Quizz[nextIndex];
-          const formattedOptions = Array.isArray(nextQ.choices)
-            ? nextQ.choices.reduce((acc, choice, idx) => {
-                const letters = ["A", "B", "C", "D"];
-                acc[letters[idx]] = choice;
-                return acc;
-              }, {})
-            : nextQ.choices;
-
-          updatedMatch.questionsAsked.push({
-            question: {
-              text: nextQ.question,
-              options: formattedOptions,
-              correctOption: nextQ.correctAnswer,
-              isConversion: nextQ.isConversion || false,
-            },
-            answers: [],
-          });
-
-          await updatedMatch.save();
-
-          io.to(matchId).emit("next_question", {
-            question: {
-              text: nextQ.question,
-              choices: formattedOptions,
-              correctAnswer: nextQ.correctAnswer,
-            },
-          });
         }, 3000);
       }
     } catch (error) {
@@ -585,6 +629,17 @@ io.on("connection", (socket) => {
       },
     });
 
+    const timer = setTimeout(() => {
+      const state = matchTimers.get(matchId);
+      if (!state?.handled) {
+        matchTimers.set(matchId, {
+          ...state,
+          handled: true,
+        });
+        proceedToNextQuestion(matchId);
+      }
+    }, 10000);
+
     matchTimers.set(matchId, { timer, handled: false });
   });
 
@@ -603,6 +658,45 @@ io.on("connection", (socket) => {
         correctAnswer: currentQuestion.question.correctOption,
       },
     });
+  });
+
+  socket.on("player_leave_match", async ({ matchId, userId }) => {
+    try {
+      const match = await Match.findById(matchId);
+
+      if (!match || match.isFinished) {
+        return socket.emit("error", {
+          message: "Match introuvable ou déjà terminé.",
+        });
+      }
+
+      // ✅ Marquer le match comme terminé
+      match.isFinished = true;
+      match.status = "finished";
+      match.leaverId = userId;
+
+      await match.save();
+
+      // ✅ Nettoyer les timers
+      const timerState = matchTimers.get(matchId);
+      if (timerState?.timer) {
+        clearTimeout(timerState.timer);
+        matchTimers.delete(matchId);
+      }
+
+      // ✅ Notifier tous les joueurs que le match est terminé à cause du départ
+      io.to(matchId.toString()).emit("match_finished_due_to_leave", {
+        matchId,
+        leaverId: userId,
+      });
+
+      console.log(`🚪 Joueur ${userId} a quitté le match ${matchId}`);
+    } catch (error) {
+      console.error("❌ Erreur dans player_leave_match :", error);
+      socket.emit("error", {
+        message: "Erreur lors de l'abandon du match.",
+      });
+    }
   });
 
   socket.on("disconnect", () => {
