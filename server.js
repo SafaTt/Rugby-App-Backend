@@ -63,7 +63,7 @@ function sendNextQuestion(match, matchId, nextIndex) {
     match.isFinished = true;
     match.save().then(() => {
       io.to(matchId).emit("match_finished", {
-        message: "Le quiz est terminé ! Merci d’avoir joué.",
+        message: "The quiz is over! Thank you for playing.",
       });
     });
     return;
@@ -124,16 +124,6 @@ io.on("connection", (socket) => {
 
   const proceedToNextQuestion = async (matchId) => {
     const currentState = matchTimers.get(matchId);
-    console.log(
-      `Etat handled dans proceedToNextQuestion :`,
-      currentState?.handled
-    );
-    if (currentState?.handled) {
-      console.log(
-        "⏭️ Question déjà gérée, on ne relance pas proceedToNextQuestion"
-      );
-      return;
-    }
 
     const match = await Match.findById(matchId);
     if (!match || match.isFinished || !match.quizStarted) {
@@ -273,8 +263,9 @@ io.on("connection", (socket) => {
     match.questionsAsked.push(newQuestion);
     await match.save();
 
-    const prevState = matchTimers.get(matchId) || {};
-    matchTimers.set(matchId, { ...prevState, handled: false });
+    // Nettoyer ancien timer s’il existe
+    const prev = matchTimers.get(matchId);
+    if (prev?.timer) clearTimeout(prev.timer);
 
     io.to(matchId).emit("next_question", {
       question: {
@@ -284,17 +275,11 @@ io.on("connection", (socket) => {
       },
     });
 
-    // Nettoyer ancien timer
-    if (matchTimers.has(matchId)) {
-      const prev = matchTimers.get(matchId);
-      if (prev?.timer) clearTimeout(prev.timer);
-    }
+    // Lancer timer après avoir émis la question
+    console.log("🧭 Timer lancé pour une nouvelle question normale");
 
-    // Timer question normale 10s
     const timer = setTimeout(() => {
-      console.log(
-        "⏱️ Timeout question normale : aucune réponse → passer à la suivante"
-      );
+      console.log("🔔 Timer terminé, vérification handled...");
       const state = matchTimers.get(matchId);
       if (!state?.handled) {
         markHandled(matchId);
@@ -302,8 +287,13 @@ io.on("connection", (socket) => {
       }
     }, 10000);
 
-    const prev = matchTimers.get(matchId) || {};
-    matchTimers.set(matchId, { ...prev, timer, handled: false });
+    // ✅ Mise à jour *complète* et *unique*
+    matchTimers.set(matchId, {
+      timer,
+      handled: false,
+      pendingConversion: null,
+      firstCorrectPlayer: null,
+    });
   };
 
   socket.on("match_joined", async (data) => {
@@ -388,6 +378,90 @@ io.on("connection", (socket) => {
       const lastQuestion = match.questionsAsked.at(-1);
       if (!lastQuestion) return;
 
+      const isGoldenPoint = matchTimers.get(matchId)?.isGoldenPoint === true;
+      const isHandled = matchTimers.get(matchId)?.handled === true;
+
+      // Si on est en GOLDEN POINT et pas encore handled
+      if (isGoldenPoint && !isHandled) {
+        const isCorrect =
+          selectedOption === lastQuestion.question.correctOption;
+
+        if (isCorrect) {
+          lastQuestion.answers.push({
+            playerId: userId,
+            selectedOption,
+            isCorrect,
+            score: 1, // ✅ Un seul point pour GOLDEN POINT
+            answeredAt: new Date(),
+          });
+
+          await match.save();
+
+          // Calcul des scores après golden point
+          let scoreUserOne = 0;
+          let scoreUserTwo = 0;
+
+          match.questionsAsked.forEach((q) => {
+            q.answers.forEach((a) => {
+              if (a.playerId.toString() === match.creatorId._id.toString()) {
+                scoreUserOne += a.score || 0;
+              } else if (
+                match.joinerId &&
+                a.playerId.toString() === match.joinerId._id.toString()
+              ) {
+                scoreUserTwo += a.score || 0;
+              }
+            });
+          });
+
+          io.to(matchId).emit("golden_point_winner", {
+            winnerId: userId,
+            message: "🏆 GOLDEN POINT! The player answered correctly!",
+            scoreUserOne,
+            scoreUserTwo,
+          });
+
+          io.to(matchId).emit("score_updated", {
+            matchId,
+            scoreUserOne,
+            scoreUserTwo,
+          });
+
+          clearTimeout(matchTimers.get(matchId)?.timer);
+          matchTimers.set(matchId, {
+            ...matchTimers.get(matchId),
+            handled: true,
+          });
+
+          // Marquer le match comme terminé
+          await Match.findByIdAndUpdate(matchId, { isFinished: true });
+
+          return; // ⛔ On sort, pas de logique normale après ça
+        } else {
+          // Mauvaise réponse => on peut juste stocker la réponse (facultatif) ou ignorer
+          lastQuestion.answers.push({
+            playerId: userId,
+            selectedOption,
+            isCorrect: false,
+            score: 0,
+            answeredAt: new Date(),
+          });
+
+          await match.save();
+
+          io.to(matchId).emit("wrong_golden_point_answer", {
+            playerId: userId,
+            message: "❌ Wrong answer during GOLDEN POINT",
+          });
+
+          return; // ⛔ Toujours sortir ici
+        }
+      }
+      if (isGoldenPoint && isHandled) return;
+
+      const totalAnswers = lastQuestion.answers.length;
+      const playersCount = match.joinerId ? 2 : 1;
+
       // Ignore si déjà répondu
       const alreadyAnswered = lastQuestion.answers.find(
         (a) => a.playerId.toString() === userId.toString()
@@ -415,13 +489,13 @@ io.on("connection", (socket) => {
 
       // Marquer handled pour stopper timer d'attente
       const currentTimerState = matchTimers.get(matchId);
-      if (currentTimerState && !currentTimerState.handled) {
+      if (totalAnswers >= playersCount) {
         matchTimers.set(matchId, {
           ...currentTimerState,
           handled: true,
         });
         console.log(
-          `🔒 Question marquée handled pour matchId=${matchId} suite à réponse`
+          `🔒 Tous les joueurs ont répondu, handled=true pour matchId=${matchId}`
         );
       }
 
@@ -484,7 +558,7 @@ io.on("connection", (socket) => {
             updatedMatch.isFinished = true;
             await updatedMatch.save();
             io.to(matchId).emit("match_finished", {
-              message: "Le quiz est terminé ! Merci d’avoir joué.",
+              message: "The quiz is over! Thank you for playing.",
             });
             return;
           }
@@ -568,14 +642,12 @@ io.on("connection", (socket) => {
               correctAnswer: convQ.correctAnswer,
             },
           });
-        }, 500);
+        }, 3000);
 
         return;
       }
 
       // Passage à la question suivante si tous les joueurs ont répondu ou délai dépassé
-      const totalAnswers = lastQuestion.answers.length;
-      const playersCount = match.joinerId ? 2 : 1;
 
       // On lance la prochaine question **sans attendre tout le monde** si besoin, ou dès que tous ont répondu
       if (totalAnswers >= 1) {
@@ -598,12 +670,12 @@ io.on("connection", (socket) => {
             });
 
             setTimeout(() => {
-              sendNextQuestion(updatedMatch, matchId, nextIndex);
+              proceedToNextQuestion(matchId);
             }, 5000);
           } else {
-            sendNextQuestion(updatedMatch, matchId, nextIndex);
+            proceedToNextQuestion(matchId);
           }
-        }, 3000);
+        }, 1000);
       }
     } catch (error) {
       console.error("❌ Erreur socket answer_question:", error);
@@ -691,7 +763,7 @@ io.on("connection", (socket) => {
 
       if (!match || match.isFinished) {
         return socket.emit("error", {
-          message: "Match introuvable ou déjà terminé.",
+          message: "Match not found or already finished.",
         });
       }
 
@@ -717,7 +789,7 @@ io.on("connection", (socket) => {
     } catch (error) {
       console.error("❌ Erreur dans player_leave_match :", error);
       socket.emit("error", {
-        message: "Erreur lors de l'abandon du match.",
+        message: "Error abandoning the match.",
       });
     }
   });
@@ -731,26 +803,40 @@ io.on("connection", (socket) => {
 
       if (!match || match.isFinished) return;
 
-      // ✅ Vérifier égalité des scores
+      const existingTimer = matchTimers.get(matchId);
+      const lastQuestion = match.questionsAsked.at(-1);
+
+      // 🛑 Ne pas relancer si une question GOLDEN a déjà été envoyée sans réponse
+      if (
+        existingTimer?.isGoldenPoint &&
+        !existingTimer?.handled &&
+        lastQuestion &&
+        lastQuestion.answers.length === 0
+      ) {
+        console.log("🛑 Une question GOLDEN POINT est déjà en cours. Ignorée.");
+        return;
+      }
+
+      // ✅ Recalculer les scores
       let scoreUserOne = 0;
       let scoreUserTwo = 0;
 
       match.questionsAsked.forEach((q) => {
         q.answers.forEach((a) => {
           if (a.playerId.toString() === match.creatorId._id.toString()) {
-            scoreUserOne += a.score;
+            scoreUserOne += a.score || 0;
           } else if (
             match.joinerId &&
             a.playerId.toString() === match.joinerId._id.toString()
           ) {
-            scoreUserTwo += a.score;
+            scoreUserTwo += a.score || 0;
           }
         });
       });
 
       if (scoreUserOne !== scoreUserTwo) return;
 
-      // ✅ Lancer question GOLDEN POINT
+      // ✅ Choisir et formater la question
       const goldenQuestion = getRandomQuestion(Quizz, match.questionsAsked);
       const formatted = Array.isArray(goldenQuestion.choices)
         ? goldenQuestion.choices.reduce((acc, choice, idx) => {
@@ -760,7 +846,7 @@ io.on("connection", (socket) => {
           }, {})
         : goldenQuestion.choices;
 
-      const newGolden = {
+      match.questionsAsked.push({
         question: {
           text: goldenQuestion.question,
           options: formatted,
@@ -769,11 +855,11 @@ io.on("connection", (socket) => {
           conversionPlayerId: null,
         },
         answers: [],
-      };
+      });
 
-      match.questionsAsked.push(newGolden);
       await match.save();
 
+      // ✅ Envoi des événements
       io.to(matchId).emit("golden_point_started", {
         message: "Golden point triggered",
       });
@@ -784,23 +870,47 @@ io.on("connection", (socket) => {
           choices: formatted,
           correctAnswer: goldenQuestion.correctAnswer,
         },
+        scoreUserOne,
+        scoreUserTwo,
       });
 
-      // ⏱️ Timer GOLDEN POINT : 10 sec max
-      if (matchTimers.has(matchId)) {
-        const old = matchTimers.get(matchId);
-        if (old?.timer) clearTimeout(old.timer);
-      }
+      // ✅ Timer GOLDEN POINT (10s)
+      if (existingTimer?.timer) clearTimeout(existingTimer.timer);
 
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         const state = matchTimers.get(matchId);
-        if (!state?.handled) {
-          io.to(matchId).emit("golden_point_timeout", {
-            message: "⏱️ Personne n’a répondu, fin du match sans vainqueur !",
-          });
+        const updatedMatch = await Match.findById(matchId);
+        const last = updatedMatch.questionsAsked.at(-1);
+        const stillNoAnswer = !last?.answers?.length;
+
+        if (!state?.handled && stillNoAnswer) {
           markHandled(matchId);
 
-          Match.findByIdAndUpdate(matchId, { isFinished: true }).exec();
+          let scoreUserOne = 0;
+          let scoreUserTwo = 0;
+          updatedMatch.questionsAsked.forEach((q) => {
+            q.answers.forEach((a) => {
+              if (
+                a.playerId.toString() === updatedMatch.creatorId._id.toString()
+              ) {
+                scoreUserOne += a.score || 0;
+              } else if (
+                updatedMatch.joinerId &&
+                a.playerId.toString() === updatedMatch.joinerId._id.toString()
+              ) {
+                scoreUserTwo += a.score || 0;
+              }
+            });
+          });
+
+          if (scoreUserOne === scoreUserTwo) {
+            io.to(matchId).emit("golden_point_trigger", { matchId });
+          } else {
+            io.to(matchId).emit("match_finished", {
+              message: "⏱️ End of the match after prolonged equality.",
+            });
+            await Match.findByIdAndUpdate(matchId, { isFinished: true });
+          }
         }
       }, 10000);
 
