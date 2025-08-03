@@ -3,19 +3,59 @@ const Quizz = require("../models/Quizz");
 
 const createMatch = async (req, res) => {
   try {
-    const { competition, duration, playerOneTeam } = req.body;
+    const {
+      competition,
+      duration,
+      playerOneTeam,
+      isAgainstAI = false,
+      playerTwoTeam: clientPlayerTwoTeam, // optionnel
+    } = req.body;
     const creatorId = req.user._id;
 
     if (!competition || !duration || !playerOneTeam) {
       return res.status(400).json({ message: "Missing match data" });
     }
 
+    let playerTwoTeam;
+    let status = "waiting";
+    let startTime = null;
+
+    if (isAgainstAI) {
+      // Match contre IA : on crée automatiquement playerTwoTeam IA
+      playerTwoTeam = {
+        title: "AI Bot",
+        color: "#888888",
+        textColor: "#000000",
+      };
+      status = "in-progress";
+      startTime = new Date();
+    } else if (clientPlayerTwoTeam) {
+      // Match humain contre humain, si playerTwoTeam fourni = match démarré
+      playerTwoTeam = clientPlayerTwoTeam;
+      status = "in-progress";
+      startTime = new Date();
+    } else {
+      // Pas d'IA, pas de playerTwoTeam => match créé mais en attente d'un autre joueur
+      status = "waiting";
+      startTime = null;
+    }
+
     const newMatch = new Match({
       competition,
       duration,
       playerOneTeam,
+      playerTwoTeam,
       creatorId,
-      questionsAsked: [], // explicitement vide au départ
+      status,
+      isAgainstAI,
+      aiSettings: isAgainstAI
+        ? {
+            accuracyRate: 0.7,
+            responseDelayMs: 2000,
+          }
+        : undefined,
+      questionsAsked: [],
+      startTime,
     });
 
     const savedMatch = await newMatch.save();
@@ -23,12 +63,18 @@ const createMatch = async (req, res) => {
     const io = req.app.get("io");
     if (io) {
       io.emit("new_match_created", { match: savedMatch });
+
+      if (status === "in-progress") {
+        io.emit("match_joined", {
+          matchId: savedMatch._id,
+          match: savedMatch,
+        });
+      }
     }
 
     res.status(201).json(savedMatch);
   } catch (error) {
     console.error("❌ Error in createMatch:", error);
-
     res.status(500).json({
       message: "Erreur lors de la création du match",
       error: error.message || error,

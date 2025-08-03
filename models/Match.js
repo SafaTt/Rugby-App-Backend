@@ -66,6 +66,20 @@ const matchSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+    isAgainstAI: {
+      type: Boolean,
+      default: false,
+    },
+    aiSettings: {
+      accuracyRate: {
+        type: Number,
+        default: 0.7,
+      },
+      responseDelayMs: {
+        type: Number,
+        default: 2000,
+      },
+    },
   },
   { timestamps: true }
 );

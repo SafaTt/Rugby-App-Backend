@@ -56,49 +56,6 @@ const getRandomQuestion = (quizzList, alreadyAsked) => {
   return notAsked[index];
 };
 
-function sendNextQuestion(match, matchId, nextIndex) {
-  const totalQuestions = Quizz.length;
-
-  if (nextIndex >= totalQuestions) {
-    match.isFinished = true;
-    match.save().then(() => {
-      io.to(matchId).emit("match_finished", {
-        message: "The quiz is over! Thank you for playing.",
-      });
-    });
-    return;
-  }
-
-  const nextQ = Quizz[nextIndex];
-  const formattedOptions = Array.isArray(nextQ.choices)
-    ? nextQ.choices.reduce((acc, choice, idx) => {
-        const letters = ["A", "B", "C", "D"];
-        acc[letters[idx]] = choice;
-        return acc;
-      }, {})
-    : nextQ.choices;
-
-  match.questionsAsked.push({
-    question: {
-      text: nextQ.question,
-      options: formattedOptions,
-      correctOption: nextQ.correctAnswer,
-      isConversion: nextQ.isConversion || false,
-    },
-    answers: [],
-  });
-
-  match.save().then(() => {
-    io.to(matchId).emit("next_question", {
-      question: {
-        text: nextQ.question,
-        choices: formattedOptions,
-        correctAnswer: nextQ.correctAnswer,
-      },
-    });
-  });
-}
-
 io.on("connection", (socket) => {
   console.log("✅ New client connected");
 
@@ -116,6 +73,58 @@ io.on("connection", (socket) => {
       );
     }
   };
+
+  async function makeAIMove(matchId, io) {
+    const match = await Match.findById(matchId);
+    if (!match || match.isFinished || !match.quizStarted) return;
+
+    if (!match.isAgainstAI) return;
+
+    const lastQuestion = match.questionsAsked.at(-1);
+    if (!lastQuestion) return;
+
+    // Vérifier si l'IA a déjà répondu
+    if (lastQuestion.answers.find((a) => a.playerId === "AI_BOT")) return;
+
+    const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
+    const willAnswerCorrectly = Math.random() < accuracy;
+
+    let selectedOption;
+    if (willAnswerCorrectly) {
+      selectedOption = lastQuestion.question.correctOption;
+    } else {
+      const options = Object.keys(lastQuestion.question.options).filter(
+        (opt) => opt !== lastQuestion.question.correctOption
+      );
+      selectedOption = options[Math.floor(Math.random() * options.length)];
+    }
+
+    // Simuler un délai d'attente (ex : 2s)
+    await new Promise((resolve) =>
+      setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 2000)
+    );
+
+    // Ajouter la réponse IA
+    lastQuestion.answers.push({
+      playerId: "AI_BOT",
+      selectedOption,
+      isCorrect: selectedOption === lastQuestion.question.correctOption,
+      score: selectedOption === lastQuestion.question.correctOption ? 4 : 0,
+      answeredAt: new Date(),
+    });
+
+    await match.save();
+
+    // Émettre l'événement à tous dans la salle
+    io.to(matchId).emit("answer_question", {
+      matchId,
+      playerId: "AI_BOT",
+      questionText: lastQuestion.question.text,
+      selectedOption,
+      isCorrect: selectedOption === lastQuestion.question.correctOption,
+      answeredAt: new Date(),
+    });
+  }
 
   socket.on("join_match_room", (matchId, callback) => {
     socket.join(matchId);
@@ -438,7 +447,7 @@ io.on("connection", (socket) => {
 
           return; // ⛔ On sort, pas de logique normale après ça
         } else {
-          // Mauvaise réponse => on peut juste stocker la réponse (facultatif) ou ignorer
+          // Mauvaise réponse pendant le golden point
           lastQuestion.answers.push({
             playerId: userId,
             selectedOption,
@@ -454,7 +463,27 @@ io.on("connection", (socket) => {
             message: "❌ Wrong answer during GOLDEN POINT",
           });
 
-          return; // ⛔ Toujours sortir ici
+          // 🆕 Vérifier si tous les joueurs ont répondu et ont échoué
+          const totalAnswers = lastQuestion.answers.length;
+          const playersCount = match.joinerId ? 2 : 1;
+          const allAnswered = totalAnswers >= playersCount;
+          const allIncorrect = lastQuestion.answers.every((a) => !a.isCorrect);
+
+          if (allAnswered && allIncorrect) {
+            console.log(
+              "🔁 Tous les joueurs ont échoué au GOLDEN POINT, relancer une nouvelle question..."
+            );
+
+            matchTimers.set(matchId, {
+              ...matchTimers.get(matchId),
+              handled: true,
+            });
+
+            // Relancer une nouvelle question golden point
+            io.to(matchId).emit("golden_point_trigger", { matchId });
+          }
+
+          return;
         }
       }
       if (isGoldenPoint && isHandled) return;
@@ -486,6 +515,15 @@ io.on("connection", (socket) => {
       });
 
       await match.save();
+
+      // ** Nouvelle partie ajoutée : appel à makeAIMove si IA dans le match **
+      if (
+        match.isAgainstAI &&
+        userId.toString() === match.creatorId.toString()
+      ) {
+        await makeAIMove(matchId, io);
+      }
+      // ** fin nouvelle partie **
 
       // Marquer handled pour stopper timer d'attente
       const currentTimerState = matchTimers.get(matchId);
