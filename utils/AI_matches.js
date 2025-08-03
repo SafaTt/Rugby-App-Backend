@@ -1,3 +1,5 @@
+const { AI_BOT_USER_ID } = require("../constants");
+const handleAnswerQuestion = require("../controllers/matchAnswer");
 const Match = require("../models/Match");
 const Quizz = require("../models/Quizz");
 
@@ -49,7 +51,41 @@ const startMatchAgainstAI = async (io, match) => {
   }
 };
 
+const simulateAIAnswer = async (io, match, questionIndex) => {
+  const matchId = match._id.toString();
+  const aiSettings = match.aiSettings || {
+    accuracyRate: 0.7,
+    responseDelayMs: 2000,
+  };
+
+  const currentQuestion = match.questionsAsked[questionIndex];
+  const correctKey = currentQuestion.question.correctOption;
+  const optionsKeys = Object.keys(currentQuestion.question.options);
+
+  let selectedOption;
+
+  // IA répond correctement avec une certaine probabilité
+  if (Math.random() < aiSettings.accuracyRate) {
+    selectedOption = correctKey;
+  } else {
+    // Choisir une mauvaise réponse
+    const wrongOptions = optionsKeys.filter((k) => k !== correctKey);
+    selectedOption =
+      wrongOptions[Math.floor(Math.random() * wrongOptions.length)];
+  }
+
+  setTimeout(async () => {
+    await handleAnswerQuestion({
+      matchId,
+      userId: AI_BOT_USER_ID,
+      selectedOption,
+      io,
+    });
+  }, aiSettings.responseDelayMs);
+};
+
 module.exports = {
   startMatchAgainstAI,
   getRandomQuestion,
+  simulateAIAnswer,
 };

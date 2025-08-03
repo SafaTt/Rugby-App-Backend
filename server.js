@@ -10,7 +10,7 @@ const matchRoutes = require("./routers/matchRoutes");
 const Match = require("./models/Match");
 const Quizz = require("./models/Quizz");
 const { log } = require("console");
-const { getRandomQuestion } = require("./utils/AI_matches");
+const { getRandomQuestion, simulateAIAnswer } = require("./utils/AI_matches");
 
 // const { startMatchCleaner } = require("./utils/matchCleaner");
 dotenv.config();
@@ -124,7 +124,6 @@ io.on("connection", (socket) => {
   });
 
   const proceedToNextQuestion = async (matchId) => {
-    const currentState = matchTimers.get(matchId);
 
     const match = await Match.findById(matchId);
     if (!match || match.isFinished || !match.quizStarted) {
@@ -774,7 +773,7 @@ io.on("connection", (socket) => {
     const match = await Match.findById(matchId);
     if (!match || !match.questionsAsked || match.questionsAsked.length === 0)
       return;
-    //Récupère la dernière question posée dans la liste.
+
     const currentQuestion =
       match.questionsAsked[match.questionsAsked.length - 1];
 
@@ -785,6 +784,11 @@ io.on("connection", (socket) => {
         correctAnswer: currentQuestion.question.correctOption,
       },
     });
+
+    // Si le match est contre IA → IA répond automatiquement
+    if (match.isAgainstAI) {
+      simulateAIAnswer(io, match, match.questionsAsked.length - 1);
+    }
   });
 
   socket.on("player_leave_match", async ({ matchId, userId }) => {
