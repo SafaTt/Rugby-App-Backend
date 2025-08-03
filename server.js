@@ -10,6 +10,7 @@ const matchRoutes = require("./routers/matchRoutes");
 const Match = require("./models/Match");
 const Quizz = require("./models/Quizz");
 const { log } = require("console");
+const { getRandomQuestion } = require("./utils/AI_matches");
 
 // const { startMatchCleaner } = require("./utils/matchCleaner");
 dotenv.config();
@@ -46,15 +47,6 @@ app.get("/", (req, res) => {
   res.send("Welcome to the backend!");
 });
 app.set("io", io);
-
-const getRandomQuestion = (quizzList, alreadyAsked) => {
-  const notAsked = quizzList.filter(
-    (q) => !alreadyAsked.some((asked) => asked.question.text === q.question)
-  );
-  if (notAsked.length === 0) return null;
-  const index = Math.floor(Math.random() * notAsked.length);
-  return notAsked[index];
-};
 
 io.on("connection", (socket) => {
   console.log("✅ New client connected");

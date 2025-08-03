@@ -1,5 +1,7 @@
+const { AI_BOT_USER_ID } = require("../constants");
 const Match = require("../models/Match");
 const Quizz = require("../models/Quizz");
+const { startMatchAgainstAI } = require("../utils/AI_matches");
 
 const createMatch = async (req, res) => {
   try {
@@ -8,9 +10,11 @@ const createMatch = async (req, res) => {
       duration,
       playerOneTeam,
       isAgainstAI = false,
-      playerTwoTeam: clientPlayerTwoTeam, // optionnel
+      playerTwoTeam: clientPlayerTwoTeam,
     } = req.body;
+
     const creatorId = req.user._id;
+    const io = req.app.get("io");
 
     if (!competition || !duration || !playerOneTeam) {
       return res.status(400).json({ message: "Missing match data" });
@@ -19,9 +23,9 @@ const createMatch = async (req, res) => {
     let playerTwoTeam;
     let status = "waiting";
     let startTime = null;
+    let joinerId = null;
 
     if (isAgainstAI) {
-      // Match contre IA : on crée automatiquement playerTwoTeam IA
       playerTwoTeam = {
         title: "AI Bot",
         color: "#888888",
@@ -29,15 +33,12 @@ const createMatch = async (req, res) => {
       };
       status = "in-progress";
       startTime = new Date();
+      joinerId = AI_BOT_USER_ID; // ← Assure-toi que cette constante est définie ailleurs
     } else if (clientPlayerTwoTeam) {
-      // Match humain contre humain, si playerTwoTeam fourni = match démarré
       playerTwoTeam = clientPlayerTwoTeam;
       status = "in-progress";
       startTime = new Date();
-    } else {
-      // Pas d'IA, pas de playerTwoTeam => match créé mais en attente d'un autre joueur
-      status = "waiting";
-      startTime = null;
+      joinerId = req.user._id;
     }
 
     const newMatch = new Match({
@@ -46,6 +47,7 @@ const createMatch = async (req, res) => {
       playerOneTeam,
       playerTwoTeam,
       creatorId,
+      joinerId,
       status,
       isAgainstAI,
       aiSettings: isAgainstAI
@@ -60,7 +62,6 @@ const createMatch = async (req, res) => {
 
     const savedMatch = await newMatch.save();
 
-    const io = req.app.get("io");
     if (io) {
       io.emit("new_match_created", { match: savedMatch });
 
@@ -69,6 +70,11 @@ const createMatch = async (req, res) => {
           matchId: savedMatch._id,
           match: savedMatch,
         });
+
+        // 🎯 Si contre IA, démarrer le quiz et envoyer quiz_start
+        if (isAgainstAI) {
+          await startMatchAgainstAI(io, savedMatch);
+        }
       }
     }
 
