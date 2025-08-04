@@ -32,22 +32,33 @@ async function makeAIMove(matchId, io) {
       setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 6000)
     );
 
-    lastQuestion.answers.push({
+    // Recharger le match avant modification
+    const updatedMatch = await Match.findById(matchId);
+    if (!updatedMatch) return;
+
+    const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
+    if (!lastQuestionUpdated) return;
+
+    const isCorrect =
+      selectedOption === lastQuestionUpdated.question.correctOption;
+    const score = isCorrect ? 1 : 0;
+
+    lastQuestionUpdated.answers.push({
       playerId: aiPlayerId,
       selectedOption,
-      isCorrect: selectedOption === lastQuestion.question.correctOption,
-      score: selectedOption === lastQuestion.question.correctOption ? 1 : 0,
+      isCorrect,
+      score,
       answeredAt: new Date(),
     });
 
-    await match.save();
+    await updatedMatch.save();
 
     io.to(matchId).emit("answer_question", {
       matchId,
       playerId: aiPlayerId,
-      questionText: lastQuestion.question.text,
+      questionText: lastQuestionUpdated.question.text,
       selectedOption,
-      isCorrect: selectedOption === lastQuestion.question.correctOption,
+      isCorrect,
       answeredAt: new Date(),
     });
 
@@ -76,7 +87,7 @@ async function makeAIMove(matchId, io) {
       scoreUserTwo,
     });
 
-    if (selectedOption === lastQuestion.question.correctOption) {
+    if (isCorrect) {
       io.to(matchId).emit("golden_point_winner", {
         winnerId: aiPlayerId,
         message: "🏆 GOLDEN POINT! The AI answered correctly!",
@@ -120,7 +131,14 @@ async function makeAIMove(matchId, io) {
   const isCorrect = selectedOption === lastQuestion.question.correctOption;
   const score = isCorrect ? (isConversion ? 2 : 4) : 0;
 
-  lastQuestion.answers.push({
+  // Recharger le match avant modification
+  const updatedMatch = await Match.findById(matchId);
+  if (!updatedMatch) return;
+
+  const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
+  if (!lastQuestionUpdated) return;
+
+  lastQuestionUpdated.answers.push({
     playerId: aiPlayerId,
     selectedOption,
     isCorrect,
@@ -128,12 +146,12 @@ async function makeAIMove(matchId, io) {
     answeredAt: new Date(),
   });
 
-  await match.save();
+  await updatedMatch.save();
 
   io.to(matchId).emit("answer_question", {
     matchId,
     playerId: aiPlayerId,
-    questionText: lastQuestion.question.text,
+    questionText: lastQuestionUpdated.question.text,
     selectedOption,
     isCorrect,
     answeredAt: new Date(),
@@ -175,12 +193,12 @@ async function makeAIMove(matchId, io) {
     });
 
     setTimeout(async () => {
-      const updatedMatch = await Match.findById(matchId);
-      const nextIndex = updatedMatch.questionsAsked.length;
+      const updatedMatch2 = await Match.findById(matchId);
+      const nextIndex = updatedMatch2.questionsAsked.length;
 
       if (nextIndex >= Quizz.length) {
-        updatedMatch.isFinished = true;
-        await updatedMatch.save();
+        updatedMatch2.isFinished = true;
+        await updatedMatch2.save();
         io.to(matchId).emit("match_finished", {
           message: "The quiz is over! Thank you for playing.",
         });
@@ -197,7 +215,7 @@ async function makeAIMove(matchId, io) {
           }, {})
         : nextQ.choices;
 
-      updatedMatch.questionsAsked.push({
+      updatedMatch2.questionsAsked.push({
         question: {
           text: nextQ.question,
           options: formattedOptions,
@@ -207,7 +225,7 @@ async function makeAIMove(matchId, io) {
         answers: [],
       });
 
-      await updatedMatch.save();
+      await updatedMatch2.save();
 
       io.to(matchId).emit("next_question", {
         question: {
@@ -250,36 +268,36 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
       const isCorrect = selectedOption === lastQuestion.question.correctOption;
 
       if (isCorrect) {
-        // 🔁 Recharge le match pour éviter les conflits de version
+        // 🔁 Recharge pour éviter conflits version
         const updatedMatch = await Match.findById(matchId);
         if (!updatedMatch) return;
-
         const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
         if (!lastQuestionUpdated) return;
 
-        // ✅ Ajouter la réponse de l'IA dans le document mis à jour
+        const score = 1; // Ou calcul approprié pour golden point
+
         lastQuestionUpdated.answers.push({
-          playerId: aiPlayerId,
+          playerId: userId,
           selectedOption,
-          isCorrect:
-            selectedOption === lastQuestionUpdated.question.correctOption,
+          isCorrect,
           score,
           answeredAt: new Date(),
         });
 
-        // ✅ Sauvegarde du match à jour
         await updatedMatch.save();
 
-        // Calcul scores
+        // Recalcul scores sur updatedMatch
         let scoreUserOne = 0;
         let scoreUserTwo = 0;
-        match.questionsAsked.forEach((q) => {
+        updatedMatch.questionsAsked.forEach((q) => {
           q.answers.forEach((a) => {
-            if (a.playerId.toString() === match.creatorId._id.toString()) {
+            if (
+              a.playerId.toString() === updatedMatch.creatorId._id.toString()
+            ) {
               scoreUserOne += a.score || 0;
             } else if (
-              match.joinerId &&
-              a.playerId.toString() === match.joinerId._id.toString()
+              updatedMatch.joinerId &&
+              a.playerId.toString() === updatedMatch.joinerId._id.toString()
             ) {
               scoreUserTwo += a.score || 0;
             }
@@ -356,7 +374,13 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
 
     const scoreToAdd = isCorrect ? (isConversion ? 2 : 4) : 0;
 
-    lastQuestion.answers.push({
+    // 🔁 Recharger match avant modification
+    const updatedMatch = await Match.findById(matchId);
+    if (!updatedMatch) return;
+    const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
+    if (!lastQuestionUpdated) return;
+
+    lastQuestionUpdated.answers.push({
       playerId: userId,
       selectedOption,
       isCorrect,
@@ -364,10 +388,11 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
       answeredAt: new Date(),
     });
 
-    await match.save();
+    await updatedMatch.save();
+
     // Gestion handled timer
     const currentTimerState = matchTimers.get(matchId);
-    if (lastQuestion.answers.length >= (match.joinerId ? 2 : 1)) {
+    if (lastQuestionUpdated.answers.length >= (updatedMatch.joinerId ? 2 : 1)) {
       matchTimers.set(matchId, {
         ...currentTimerState,
         handled: true,
@@ -377,13 +402,13 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
     io.to(matchId).emit("answer_question", {
       matchId,
       playerId: userId,
-      questionText: lastQuestion.question.text,
+      questionText: lastQuestionUpdated.question.text,
       selectedOption,
       isCorrect,
       answeredAt: new Date(),
     });
 
-    // Recalcul des scores
+    // Recalcul scores sur updatedMatch
     const freshMatch = await Match.findById(matchId)
       .populate("creatorId")
       .populate("joinerId");
@@ -410,12 +435,12 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
       scoreUserTwo,
     });
 
-    // Gestion conversion
+    // Gestion conversion (si conversion et joueur concerné)
     if (isConversion && isConversionPlayer) {
       const teamTitle =
-        userId.toString() === match.creatorId.toString()
-          ? match.playerOneTeam.title
-          : match.playerTwoTeam?.title || "Team";
+        userId.toString() === freshMatch.creatorId._id.toString()
+          ? freshMatch.playerOneTeam.title
+          : freshMatch.playerTwoTeam?.title || "Team";
 
       io.to(matchId).emit("conversion_result", {
         playerId: userId,
@@ -426,12 +451,12 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
       });
 
       setTimeout(async () => {
-        const updatedMatch = await Match.findById(matchId);
-        const nextIndex = updatedMatch.questionsAsked.length;
+        const updatedMatch2 = await Match.findById(matchId);
+        const nextIndex = updatedMatch2.questionsAsked.length;
 
         if (nextIndex >= Quizz.length) {
-          updatedMatch.isFinished = true;
-          await updatedMatch.save();
+          updatedMatch2.isFinished = true;
+          await updatedMatch2.save();
           io.in(matchId).socketsLeave(matchId);
           io.to(matchId).emit("match_finished", {
             message: "The quiz is over! Thank you for playing.",
@@ -449,7 +474,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
             }, {})
           : nextQ.choices;
 
-        updatedMatch.questionsAsked.push({
+        updatedMatch2.questionsAsked.push({
           question: {
             text: nextQ.question,
             options: formattedOptions,
@@ -459,7 +484,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
           answers: [],
         });
 
-        await updatedMatch.save();
+        await updatedMatch2.save();
 
         io.to(matchId).emit("next_question", {
           question: {
@@ -468,7 +493,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
             correctAnswer: nextQ.correctAnswer,
           },
         });
-        // Laisser le temps à la question d’être reçue, puis refaire jouer l’IA
+
         if (match.isAgainstAI) {
           setTimeout(() => {
             makeAIMove(matchId, io);
@@ -482,9 +507,9 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
     // Notifications réponses correctes normales (hors conversion)
     if (isCorrect && !isConversion) {
       const teamTitle =
-        userId.toString() === match.creatorId.toString()
-          ? match.playerOneTeam.title
-          : match.playerTwoTeam?.title || "Team";
+        userId.toString() === freshMatch.creatorId._id.toString()
+          ? freshMatch.playerOneTeam.title
+          : freshMatch.playerTwoTeam?.title || "Team";
 
       io.to(matchId).emit("correct_answer_received", {
         playerId: userId,
@@ -515,8 +540,8 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
           answers: [],
         };
 
-        match.questionsAsked.push(conversionQuestion);
-        await match.save();
+        freshMatch.questionsAsked.push(conversionQuestion);
+        await freshMatch.save();
 
         io.to(matchId).emit("conversion_question", {
           playerId: userId,
@@ -527,9 +552,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
           },
         });
 
-        // ⚠️ Si c’est l’IA qui a répondu correctement → forcer réponse automatique
         if (userId.toString() === AI_BOT_USER_ID.toString()) {
-          // Laisse 1s de délai, puis appel de makeAIMove
           setTimeout(() => {
             makeAIMove(matchId, io);
           }, 1000);
@@ -540,19 +563,19 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
     }
 
     // Passage à la question suivante si tous ont répondu
-    if (lastQuestion.answers.length >= 1) {
+    if (lastQuestionUpdated.answers.length >= 1) {
       setTimeout(async () => {
-        const updatedMatch = await Match.findById(matchId);
-        const nextIndex = updatedMatch.questionsAsked.length;
+        const updatedMatch3 = await Match.findById(matchId);
+        const nextIndex = updatedMatch3.questionsAsked.length;
         const totalQuestions = Quizz.length;
 
         const isHalfTime =
-          !updatedMatch.halfTimeTriggered &&
+          !updatedMatch3.halfTimeTriggered &&
           nextIndex >= Math.floor(totalQuestions / 2);
 
         if (isHalfTime) {
-          updatedMatch.halfTimeTriggered = true;
-          await updatedMatch.save();
+          updatedMatch3.halfTimeTriggered = true;
+          await updatedMatch3.save();
 
           io.to(matchId).emit("half_time", {
             message: "⏸️ HALF-TIME! Quick break!",
