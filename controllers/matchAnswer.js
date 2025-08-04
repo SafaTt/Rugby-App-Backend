@@ -5,13 +5,12 @@ const matchTimers = new Map();
 
 async function makeAIMove(matchId, io) {
   const match = await Match.findById(matchId);
-  if (!match || match.isFinished || !match.quizStarted) return;
-  if (!match.isAgainstAI) return;
+  if (!match || match.isFinished || !match.quizStarted || !match.isAgainstAI)
+    return;
 
   const lastQuestion = match.questionsAsked.at(-1);
   if (!lastQuestion) return;
 
-  // IA ne doit répondre qu’une seule fois par question
   if (lastQuestion.answers.find((a) => a.playerId.equals(AI_BOT_USER_ID)))
     return;
 
@@ -19,23 +18,16 @@ async function makeAIMove(matchId, io) {
   const isGoldenPoint = matchTimers.get(matchId)?.isGoldenPoint === true;
   const isConversion = lastQuestion.question.isConversion === true;
 
-  // Gestion du Golden Point (réponse IA spécifique)
+  // Gestion GOLDEN POINT
   if (isGoldenPoint) {
-    // Simuler précision IA
     const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
     const willAnswerCorrectly = Math.random() < accuracy;
+    const selectedOption = willAnswerCorrectly
+      ? lastQuestion.question.correctOption
+      : Object.keys(lastQuestion.question.options)
+          .filter((opt) => opt !== lastQuestion.question.correctOption)
+          .sort(() => 0.5 - Math.random())[0];
 
-    let selectedOption;
-    if (willAnswerCorrectly) {
-      selectedOption = lastQuestion.question.correctOption;
-    } else {
-      const options = Object.keys(lastQuestion.question.options).filter(
-        (opt) => opt !== lastQuestion.question.correctOption
-      );
-      selectedOption = options[Math.floor(Math.random() * options.length)];
-    }
-
-    // Délai de réponse IA
     await new Promise((resolve) =>
       setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 2000)
     );
@@ -44,7 +36,7 @@ async function makeAIMove(matchId, io) {
       playerId: aiPlayerId,
       selectedOption,
       isCorrect: selectedOption === lastQuestion.question.correctOption,
-      score: selectedOption === lastQuestion.question.correctOption ? 1 : 0, // Golden Point = 1 point
+      score: selectedOption === lastQuestion.question.correctOption ? 1 : 0,
       answeredAt: new Date(),
     });
 
@@ -59,14 +51,12 @@ async function makeAIMove(matchId, io) {
       answeredAt: new Date(),
     });
 
-    // Recalcul scores
     const freshMatch = await Match.findById(matchId)
       .populate("creatorId")
       .populate("joinerId");
 
     let scoreUserOne = 0;
     let scoreUserTwo = 0;
-
     freshMatch.questionsAsked.forEach((q) => {
       q.answers.forEach((a) => {
         if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
@@ -86,7 +76,6 @@ async function makeAIMove(matchId, io) {
       scoreUserTwo,
     });
 
-    // Si IA gagne golden point, finir la partie
     if (selectedOption === lastQuestion.question.correctOption) {
       io.to(matchId).emit("golden_point_winner", {
         winnerId: aiPlayerId,
@@ -107,50 +96,34 @@ async function makeAIMove(matchId, io) {
     return;
   }
 
-  // Gestion conversion : vérifier que c’est bien le tour de l’IA
-  if (isConversion) {
-    if (
-      !lastQuestion.question.conversionPlayerId ||
-      !lastQuestion.question.conversionPlayerId.equals(aiPlayerId)
-    ) {
-      // Pas le tour de l’IA => ne pas répondre
-      return;
-    } else {
-      console.log("✅ AI autorisé à répondre à la conversion");
-    }
+  // Conversion : vérifier si c'est bien au tour de l'IA
+  if (
+    isConversion &&
+    (!lastQuestion.question.conversionPlayerId ||
+      !lastQuestion.question.conversionPlayerId.equals(aiPlayerId))
+  ) {
+    return;
   }
 
-  // Précision IA
   const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
   const willAnswerCorrectly = Math.random() < accuracy;
+  const selectedOption = willAnswerCorrectly
+    ? lastQuestion.question.correctOption
+    : Object.keys(lastQuestion.question.options)
+        .filter((opt) => opt !== lastQuestion.question.correctOption)
+        .sort(() => 0.5 - Math.random())[0];
 
-  let selectedOption;
-  if (willAnswerCorrectly) {
-    selectedOption = lastQuestion.question.correctOption;
-  } else {
-    const options = Object.keys(lastQuestion.question.options).filter(
-      (opt) => opt !== lastQuestion.question.correctOption
-    );
-    selectedOption = options[Math.floor(Math.random() * options.length)];
-  }
-
-  // Délai de réponse IA
   await new Promise((resolve) =>
     setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 8000)
   );
 
-  // Calcul du score
-  const score =
-    selectedOption === lastQuestion.question.correctOption
-      ? isConversion
-        ? 2
-        : 4
-      : 0;
+  const isCorrect = selectedOption === lastQuestion.question.correctOption;
+  const score = isCorrect ? (isConversion ? 2 : 4) : 0;
 
   lastQuestion.answers.push({
     playerId: aiPlayerId,
     selectedOption,
-    isCorrect: selectedOption === lastQuestion.question.correctOption,
+    isCorrect,
     score,
     answeredAt: new Date(),
   });
@@ -162,18 +135,16 @@ async function makeAIMove(matchId, io) {
     playerId: aiPlayerId,
     questionText: lastQuestion.question.text,
     selectedOption,
-    isCorrect: selectedOption === lastQuestion.question.correctOption,
+    isCorrect,
     answeredAt: new Date(),
   });
 
-  // Recalcul des scores après réponse IA
   const freshMatch = await Match.findById(matchId)
     .populate("creatorId")
     .populate("joinerId");
 
   let scoreUserOne = 0;
   let scoreUserTwo = 0;
-
   freshMatch.questionsAsked.forEach((q) => {
     q.answers.forEach((a) => {
       if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
@@ -187,14 +158,77 @@ async function makeAIMove(matchId, io) {
     });
   });
 
-  io.to(matchId).emit("score_updated", {
-    matchId,
-    scoreUserOne,
-    scoreUserTwo,
-  });
+  io.to(matchId).emit("score_updated", { matchId, scoreUserOne, scoreUserTwo });
 
-  // Appeler récursivement pour que l'IA joue les questions suivantes si besoin
-  await makeAIMove(matchId, io);
+  if (isConversion) {
+    const teamTitle =
+      aiPlayerId.toString() === match.creatorId.toString()
+        ? match.playerOneTeam.title
+        : match.playerTwoTeam?.title || "Team";
+
+    io.to(matchId).emit("conversion_result", {
+      playerId: aiPlayerId,
+      success: isCorrect,
+      message: isCorrect
+        ? `${teamTitle} CONVERSION SUCCESSFUL`
+        : `${teamTitle} CONVERSION UNSUCCESSFUL`,
+    });
+
+    setTimeout(async () => {
+      const updatedMatch = await Match.findById(matchId);
+      const nextIndex = updatedMatch.questionsAsked.length;
+
+      if (nextIndex >= Quizz.length) {
+        updatedMatch.isFinished = true;
+        await updatedMatch.save();
+        io.to(matchId).emit("match_finished", {
+          message: "The quiz is over! Thank you for playing.",
+        });
+        io.in(matchId).socketsLeave(matchId);
+        return;
+      }
+
+      const nextQ = Quizz[nextIndex];
+      const formattedOptions = Array.isArray(nextQ.choices)
+        ? nextQ.choices.reduce((acc, choice, idx) => {
+            const letters = ["A", "B", "C", "D"];
+            acc[letters[idx]] = choice;
+            return acc;
+          }, {})
+        : nextQ.choices;
+
+      updatedMatch.questionsAsked.push({
+        question: {
+          text: nextQ.question,
+          options: formattedOptions,
+          correctOption: nextQ.correctAnswer,
+          isConversion: nextQ.isConversion || false,
+        },
+        answers: [],
+      });
+
+      await updatedMatch.save();
+
+      io.to(matchId).emit("next_question", {
+        question: {
+          text: nextQ.question,
+          choices: formattedOptions,
+          correctAnswer: nextQ.correctAnswer,
+        },
+      });
+
+      // 👉 L’IA rejoue automatiquement si c’est un match IA
+      if (match.isAgainstAI) {
+        setTimeout(() => {
+          makeAIMove(matchId, io);
+        }, 1000);
+      }
+    }, 1000);
+
+    return;
+  }
+
+  // Cas normal : rien à faire, `handleAnswerQuestion` prendra le relais côté joueur
 }
 
 async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
@@ -388,10 +422,10 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
         if (nextIndex >= Quizz.length) {
           updatedMatch.isFinished = true;
           await updatedMatch.save();
+          io.in(matchId).socketsLeave(matchId);
           io.to(matchId).emit("match_finished", {
             message: "The quiz is over! Thank you for playing.",
           });
-          io.in(matchId).socketsLeave(matchId);
 
           return;
         }
@@ -424,6 +458,12 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
             correctAnswer: nextQ.correctAnswer,
           },
         });
+        // Laisser le temps à la question d’être reçue, puis refaire jouer l’IA
+        if (match.isAgainstAI) {
+          setTimeout(() => {
+            makeAIMove(matchId, io);
+          }, 1000);
+        }
       }, 1000);
 
       return;
