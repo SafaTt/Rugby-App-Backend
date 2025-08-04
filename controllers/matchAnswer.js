@@ -29,7 +29,7 @@ async function makeAIMove(matchId, io) {
           .sort(() => 0.5 - Math.random())[0];
 
     await new Promise((resolve) =>
-      setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 2000)
+      setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 6000)
     );
 
     lastQuestion.answers.push({
@@ -250,15 +250,25 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
       const isCorrect = selectedOption === lastQuestion.question.correctOption;
 
       if (isCorrect) {
-        lastQuestion.answers.push({
-          playerId: userId,
+        // 🔁 Recharge le match pour éviter les conflits de version
+        const updatedMatch = await Match.findById(matchId);
+        if (!updatedMatch) return;
+
+        const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
+        if (!lastQuestionUpdated) return;
+
+        // ✅ Ajouter la réponse de l'IA dans le document mis à jour
+        lastQuestionUpdated.answers.push({
+          playerId: aiPlayerId,
           selectedOption,
-          isCorrect,
-          score: 1, // point unique en Golden Point
+          isCorrect:
+            selectedOption === lastQuestionUpdated.question.correctOption,
+          score,
           answeredAt: new Date(),
         });
 
-        await match.save();
+        // ✅ Sauvegarde du match à jour
+        await updatedMatch.save();
 
         // Calcul scores
         let scoreUserOne = 0;
