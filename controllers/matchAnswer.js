@@ -18,6 +18,14 @@ async function makeAIMove(matchId, io) {
   const isGoldenPoint = matchTimers.get(matchId)?.isGoldenPoint === true;
   const isConversion = lastQuestion.question.isConversion === true;
 
+  if (isConversion) {
+    const humanAnswered = lastQuestion.answers.some(
+      (a) => a.playerId.toString() !== AI_BOT_USER_ID.toString()
+    );
+    if (humanAnswered) {
+      return; // Un humain a déjà répondu à la conversion, l'IA ne doit pas répondre
+    }
+  }
   // Gestion GOLDEN POINT
   if (isGoldenPoint) {
     const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
