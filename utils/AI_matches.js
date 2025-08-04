@@ -75,6 +75,13 @@ const simulateAIAnswer = async (io, match, questionIndex) => {
   }
 
   setTimeout(async () => {
+    const isCorrect = selectedOption === correctKey;
+
+    console.log(
+      `🤖 L'IA répond à la question "${currentQuestion.question.text}"`,
+      `\n→ Option choisie : ${selectedOption} (${currentQuestion.question.options[selectedOption]})`,
+      `\n→ Réponse correcte ? ${isCorrect ? "✅ OUI" : "❌ NON"}`
+    );
     await handleAnswerQuestion({
       matchId,
       userId: AI_BOT_USER_ID,

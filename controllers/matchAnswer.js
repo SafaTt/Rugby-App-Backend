@@ -1,3 +1,4 @@
+const { AI_BOT_USER_ID } = require("../constants");
 const Match = require("../models/Match");
 const Quizz = require("../models/Quizz");
 const matchTimers = new Map();
@@ -5,15 +6,121 @@ const matchTimers = new Map();
 async function makeAIMove(matchId, io) {
   const match = await Match.findById(matchId);
   if (!match || match.isFinished || !match.quizStarted) return;
-
   if (!match.isAgainstAI) return;
 
   const lastQuestion = match.questionsAsked.at(-1);
   if (!lastQuestion) return;
 
-  // Vérifier si l'IA a déjà répondu
-  if (lastQuestion.answers.find((a) => a.playerId === "AI_BOT")) return;
+  // IA ne doit répondre qu’une seule fois par question
+  if (lastQuestion.answers.find((a) => a.playerId.equals(AI_BOT_USER_ID)))
+    return;
 
+  const aiPlayerId = AI_BOT_USER_ID;
+  const isGoldenPoint = matchTimers.get(matchId)?.isGoldenPoint === true;
+  const isConversion = lastQuestion.question.isConversion === true;
+
+  // Gestion du Golden Point (réponse IA spécifique)
+  if (isGoldenPoint) {
+    // Simuler précision IA
+    const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
+    const willAnswerCorrectly = Math.random() < accuracy;
+
+    let selectedOption;
+    if (willAnswerCorrectly) {
+      selectedOption = lastQuestion.question.correctOption;
+    } else {
+      const options = Object.keys(lastQuestion.question.options).filter(
+        (opt) => opt !== lastQuestion.question.correctOption
+      );
+      selectedOption = options[Math.floor(Math.random() * options.length)];
+    }
+
+    // Délai de réponse IA
+    await new Promise((resolve) =>
+      setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 2000)
+    );
+
+    lastQuestion.answers.push({
+      playerId: aiPlayerId,
+      selectedOption,
+      isCorrect: selectedOption === lastQuestion.question.correctOption,
+      score: selectedOption === lastQuestion.question.correctOption ? 1 : 0, // Golden Point = 1 point
+      answeredAt: new Date(),
+    });
+
+    await match.save();
+
+    io.to(matchId).emit("answer_question", {
+      matchId,
+      playerId: aiPlayerId,
+      questionText: lastQuestion.question.text,
+      selectedOption,
+      isCorrect: selectedOption === lastQuestion.question.correctOption,
+      answeredAt: new Date(),
+    });
+
+    // Recalcul scores
+    const freshMatch = await Match.findById(matchId)
+      .populate("creatorId")
+      .populate("joinerId");
+
+    let scoreUserOne = 0;
+    let scoreUserTwo = 0;
+
+    freshMatch.questionsAsked.forEach((q) => {
+      q.answers.forEach((a) => {
+        if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
+          scoreUserOne += a.score || 0;
+        } else if (
+          freshMatch.joinerId &&
+          a.playerId.toString() === freshMatch.joinerId._id.toString()
+        ) {
+          scoreUserTwo += a.score || 0;
+        }
+      });
+    });
+
+    io.to(matchId).emit("score_updated", {
+      matchId,
+      scoreUserOne,
+      scoreUserTwo,
+    });
+
+    // Si IA gagne golden point, finir la partie
+    if (selectedOption === lastQuestion.question.correctOption) {
+      io.to(matchId).emit("golden_point_winner", {
+        winnerId: aiPlayerId,
+        message: "🏆 GOLDEN POINT! The AI answered correctly!",
+        scoreUserOne,
+        scoreUserTwo,
+      });
+
+      clearTimeout(matchTimers.get(matchId)?.timer);
+      matchTimers.set(matchId, {
+        ...matchTimers.get(matchId),
+        handled: true,
+      });
+
+      await Match.findByIdAndUpdate(matchId, { isFinished: true });
+    }
+
+    return;
+  }
+
+  // Gestion conversion : vérifier que c’est bien le tour de l’IA
+  if (isConversion) {
+    if (
+      !lastQuestion.question.conversionPlayerId ||
+      !lastQuestion.question.conversionPlayerId.equals(aiPlayerId)
+    ) {
+      // Pas le tour de l’IA => ne pas répondre
+      return;
+    } else {
+      console.log("✅ AI autorisé à répondre à la conversion");
+    }
+  }
+
+  // Précision IA
   const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
   const willAnswerCorrectly = Math.random() < accuracy;
 
@@ -27,31 +134,67 @@ async function makeAIMove(matchId, io) {
     selectedOption = options[Math.floor(Math.random() * options.length)];
   }
 
-  // Simuler un délai d'attente (ex : 2s)
+  // Délai de réponse IA
   await new Promise((resolve) =>
-    setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 2000)
+    setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 8000)
   );
 
-  // Ajouter la réponse IA
+  // Calcul du score
+  const score =
+    selectedOption === lastQuestion.question.correctOption
+      ? isConversion
+        ? 2
+        : 4
+      : 0;
+
   lastQuestion.answers.push({
-    playerId: "AI_BOT",
+    playerId: aiPlayerId,
     selectedOption,
     isCorrect: selectedOption === lastQuestion.question.correctOption,
-    score: selectedOption === lastQuestion.question.correctOption ? 4 : 0,
+    score,
     answeredAt: new Date(),
   });
 
   await match.save();
 
-  // Émettre l'événement à tous dans la salle
   io.to(matchId).emit("answer_question", {
     matchId,
-    playerId: "AI_BOT",
+    playerId: aiPlayerId,
     questionText: lastQuestion.question.text,
     selectedOption,
     isCorrect: selectedOption === lastQuestion.question.correctOption,
     answeredAt: new Date(),
   });
+
+  // Recalcul des scores après réponse IA
+  const freshMatch = await Match.findById(matchId)
+    .populate("creatorId")
+    .populate("joinerId");
+
+  let scoreUserOne = 0;
+  let scoreUserTwo = 0;
+
+  freshMatch.questionsAsked.forEach((q) => {
+    q.answers.forEach((a) => {
+      if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
+        scoreUserOne += a.score || 0;
+      } else if (
+        freshMatch.joinerId &&
+        a.playerId.toString() === freshMatch.joinerId._id.toString()
+      ) {
+        scoreUserTwo += a.score || 0;
+      }
+    });
+  });
+
+  io.to(matchId).emit("score_updated", {
+    matchId,
+    scoreUserOne,
+    scoreUserTwo,
+  });
+
+  // Appeler récursivement pour que l'IA joue les questions suivantes si besoin
+  await makeAIMove(matchId, io);
 }
 
 async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
@@ -178,12 +321,6 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
     });
 
     await match.save();
-
-    // Appel IA si match solo
-    if (match.isAgainstAI && userId.toString() === match.creatorId.toString()) {
-      await makeAIMove(matchId, io);
-    }
-
     // Gestion handled timer
     const currentTimerState = matchTimers.get(matchId);
     if (lastQuestion.answers.length >= (match.joinerId ? 2 : 1)) {
@@ -254,6 +391,8 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
           io.to(matchId).emit("match_finished", {
             message: "The quiz is over! Thank you for playing.",
           });
+          io.in(matchId).socketsLeave(matchId);
+
           return;
         }
 
@@ -285,7 +424,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
             correctAnswer: nextQ.correctAnswer,
           },
         });
-      }, 4000);
+      }, 1000);
 
       return;
     }
@@ -315,7 +454,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
             }, {})
           : convQ.choices;
 
-        match.questionsAsked.push({
+        const conversionQuestion = {
           question: {
             text: convQ.question,
             options: formattedConvOptions,
@@ -324,8 +463,9 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
             conversionPlayerId: userId,
           },
           answers: [],
-        });
+        };
 
+        match.questionsAsked.push(conversionQuestion);
         await match.save();
 
         io.to(matchId).emit("conversion_question", {
@@ -336,7 +476,15 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
             correctAnswer: convQ.correctAnswer,
           },
         });
-      }, 3000);
+
+        // ⚠️ Si c’est l’IA qui a répondu correctement → forcer réponse automatique
+        if (userId.toString() === AI_BOT_USER_ID.toString()) {
+          // Laisse 1s de délai, puis appel de makeAIMove
+          setTimeout(() => {
+            makeAIMove(matchId, io);
+          }, 1000);
+        }
+      }, 1000);
 
       return;
     }
@@ -361,10 +509,10 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
           });
 
           setTimeout(() => {
-            proceedToNextQuestion(matchId);
-          }, 5000);
+            proceedToNextQuestion(matchId, io, userId);
+          }, 1000);
         } else {
-          proceedToNextQuestion(matchId);
+          proceedToNextQuestion(matchId, io, userId);
         }
       }, 1000);
     }
@@ -372,5 +520,203 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
     console.error("❌ Erreur dans handleAnswerQuestion :", error);
   }
 }
+
+const getRandomQuestion = (quizzList, alreadyAsked) => {
+  const notAsked = quizzList.filter(
+    (q) => !alreadyAsked.some((asked) => asked.question.text === q.question)
+  );
+  if (notAsked.length === 0) return null;
+  const index = Math.floor(Math.random() * notAsked.length);
+  return notAsked[index];
+};
+
+const markHandled = (matchId) => {
+  const current = matchTimers.get(matchId);
+  if (current) {
+    console.log(`🔒 handled=true pour matchId=${matchId}`);
+    matchTimers.set(matchId, {
+      ...current,
+      handled: true,
+    });
+  } else {
+    console.log(
+      `⚠️ markHandled appelé mais aucun timer trouvé pour matchId=${matchId}`
+    );
+  }
+};
+const proceedToNextQuestion = async (matchId, io, userId) => {
+  const match = await Match.findById(matchId);
+  if (!match || match.isFinished || !match.quizStarted) {
+    console.log("🚫 Match non valide pour continuer la partie");
+    return;
+  }
+
+  let justInjectedConversion = false;
+  const timerState = matchTimers.get(matchId);
+
+  // Si conversion en attente, on l'injecte
+  if (timerState?.pendingConversion) {
+    const convQuestion = timerState.pendingConversion;
+
+    convQuestion.question.text = convQuestion.question.text || "MISSING_TEXT";
+    convQuestion.question.options = convQuestion.question.options || {};
+    convQuestion.question.correctOption =
+      convQuestion.question.correctOption || null;
+    convQuestion.question.isConversion = true;
+
+    match.questionsAsked.push(convQuestion);
+    await match.save();
+    justInjectedConversion = true;
+
+    if (timerState.timer) clearTimeout(timerState.timer);
+    matchTimers.set(matchId, {
+      ...timerState,
+      handled: true,
+      pendingConversion: null,
+    });
+
+    console.log("🔁 Conversion injectée par timeout");
+    // On continue la suite (sans return ici)
+  }
+
+  // Nouvelle question normale
+  const next = getRandomQuestion(Quizz, match.questionsAsked);
+  if (!next) {
+    match.isFinished = true;
+    await match.save();
+    io.to(matchId).emit("match_finished", { matchId });
+    io.in(matchId).socketsLeave(matchId);
+
+    console.log("🏁 Fin du match, plus de questions dispo");
+    return;
+  }
+
+  const formatted = Array.isArray(next.choices)
+    ? next.choices.reduce((acc, choice, idx) => {
+        const letters = ["A", "B", "C", "D"];
+        acc[letters[idx]] = choice;
+        return acc;
+      }, {})
+    : next.choices;
+
+  const lastQuestionIndex = match.questionsAsked.length - 1;
+  const previousQuestion =
+    lastQuestionIndex >= 0 ? match.questionsAsked[lastQuestionIndex] : null;
+
+  // Détecter si on doit lancer une conversion
+  let launchConversion = false;
+  let playerIdToConvert = null;
+
+  if (
+    previousQuestion &&
+    !justInjectedConversion &&
+    !previousQuestion.question.isConversion
+  ) {
+    const state = matchTimers.get(matchId);
+    if (state?.firstCorrectPlayer) {
+      launchConversion = true;
+      playerIdToConvert = state.firstCorrectPlayer;
+    }
+  }
+
+  const newQuestion = {
+    question: {
+      text: next.question,
+      options: formatted,
+      correctOption: next.correctAnswer,
+      isConversion: false,
+      conversionPlayerId: null,
+    },
+    answers: [],
+  };
+
+  if (launchConversion) {
+    io.to(matchId.toString()).emit("conversion_question", {
+      playerId: playerIdToConvert,
+      question: {
+        text: next.question,
+        choices: formatted,
+        correctAnswer: next.correctAnswer,
+      },
+    });
+
+    // Clear ancien timer
+    if (matchTimers.has(matchId)) {
+      const old = matchTimers.get(matchId);
+      if (old?.timer) clearTimeout(old.timer);
+    }
+
+    // Timer conversion 10s
+    const timer = setTimeout(async () => {
+      const refreshedMatch = await Match.findById(matchId);
+      if (refreshedMatch?.isFinished) return;
+
+      const state = matchTimers.get(matchId);
+      if (!state?.handled) {
+        console.log("Etat au timeout :", state);
+
+        console.log(
+          "⏱️ Timeout conversion : aucune réponse → passer à la question suivante"
+        );
+        markHandled(matchId);
+        proceedToNextQuestion(matchId, io, userId);
+      }
+    }, 10000);
+
+    matchTimers.set(matchId, {
+      timer,
+      handled: false,
+      pendingConversion: {
+        question: {
+          text: next.question,
+          options: formatted,
+          correctOption: next.correctAnswer,
+          isConversion: true,
+          conversionPlayerId: playerIdToConvert,
+        },
+        answers: [],
+      },
+    });
+
+    return; // On attend la conversion avant d'envoyer une question normale suivante
+  }
+
+  // Sinon on ajoute la question normale
+  match.questionsAsked.push(newQuestion);
+  await match.save();
+
+  // Nettoyer ancien timer s’il existe
+  const prev = matchTimers.get(matchId);
+  if (prev?.timer) clearTimeout(prev.timer);
+
+  io.to(matchId).emit("next_question", {
+    question: {
+      text: next.question,
+      choices: formatted,
+      correctAnswer: next.correctAnswer,
+    },
+  });
+  await makeAIMove(matchId, io);
+
+  // Lancer timer après avoir émis la question
+  console.log("🧭 Timer lancé pour une nouvelle question normale");
+
+  const timer = setTimeout(() => {
+    console.log("🔔 Timer terminé, vérification handled...");
+    const state = matchTimers.get(matchId);
+    if (!state?.handled) {
+      markHandled(matchId);
+      proceedToNextQuestion(matchId, io, userId);
+    }
+  }, 10000);
+
+  // ✅ Mise à jour *complète* et *unique*
+  matchTimers.set(matchId, {
+    timer,
+    handled: false,
+    pendingConversion: null,
+    firstCorrectPlayer: null,
+  });
+};
 
 module.exports = handleAnswerQuestion;

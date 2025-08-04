@@ -124,7 +124,6 @@ io.on("connection", (socket) => {
   });
 
   const proceedToNextQuestion = async (matchId) => {
-
     const match = await Match.findById(matchId);
     if (!match || match.isFinished || !match.quizStarted) {
       console.log("🚫 Match non valide pour continuer la partie");
@@ -165,6 +164,7 @@ io.on("connection", (socket) => {
       match.isFinished = true;
       await match.save();
       io.to(matchId).emit("match_finished", { matchId });
+      io.in(matchId).socketsLeave(matchId);
       console.log("🏁 Fin du match, plus de questions dispo");
       return;
     }
@@ -589,6 +589,8 @@ io.on("connection", (socket) => {
             io.to(matchId).emit("match_finished", {
               message: "The quiz is over! Thank you for playing.",
             });
+            io.in(matchId).socketsLeave(matchId);
+
             return;
           }
 
@@ -814,6 +816,7 @@ io.on("connection", (socket) => {
         clearTimeout(timerState.timer);
         matchTimers.delete(matchId);
       }
+      io.in(matchId).socketsLeave(matchId);
 
       // ✅ Notifier tous les joueurs que le match est terminé à cause du départ
       io.to(matchId.toString()).emit("match_finished_due_to_leave", {
@@ -943,6 +946,8 @@ io.on("connection", (socket) => {
             io.to(matchId).emit("match_finished", {
               message: "⏱️ End of the match after prolonged equality.",
             });
+            io.in(matchId).socketsLeave(matchId);
+
             await Match.findByIdAndUpdate(matchId, { isFinished: true });
           }
         }
