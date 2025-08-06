@@ -678,39 +678,54 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Passage à la question suivante si tous les joueurs ont répondu ou délai dépassé
-
       // On lance la prochaine question **sans attendre tout le monde** si besoin, ou dès que tous ont répondu
       if (totalAnswers >= 1) {
-        // On pourrait forcer la suite dès la 1ère réponse pour ne pas bloquer sur les absents
-        setTimeout(async () => {
-          const updatedMatch = await Match.findById(matchId);
-          const nextIndex = updatedMatch.questionsAsked.length;
-          const totalQuestions = Quizz.length;
-
-          const isHalfTime =
-            !updatedMatch.halfTimeTriggered &&
-            nextIndex >= Math.floor(totalQuestions / 2);
-
-          if (isHalfTime) {
-            updatedMatch.halfTimeTriggered = true;
-            await updatedMatch.save();
-
-            io.to(matchId).emit("half_time", {
-              message: "⏸️ HALF-TIME! Quick break!",
-            });
-
-            setTimeout(() => {
-              proceedToNextQuestion(matchId);
-            }, 5000);
-          } else {
-            proceedToNextQuestion(matchId);
-          }
+        setTimeout(() => {
+          proceedToNextQuestion(matchId);
         }, 1000);
       }
     } catch (error) {
       console.error("❌ Erreur socket answer_question:", error);
     }
+  });
+
+  socket.on("half_time_triggered", async ({ matchId }) => {
+    const match = await Match.findById(matchId);
+    if (!match || match.halfTimeTriggered) return;
+
+    match.halfTimeTriggered = true;
+    await match.save();
+
+    const timerState = matchTimers.get(matchId);
+    if (timerState) {
+      // Marquer que c’est pause half-time
+      matchTimers.set(matchId, {
+        ...timerState,
+        isHalfTime: true,
+      });
+
+      // Stopper le timer de la question en cours s’il existe
+      clearTimeout(timerState.timer);
+    }
+
+    io.to(matchId).emit("half_time", {
+      message: "⏸️ HALF-TIME! Quick break!",
+    });
+
+    // Reprendre après 5 secondes
+    setTimeout(() => {
+      const prev = matchTimers.get(matchId);
+      if (prev) {
+        matchTimers.set(matchId, {
+          ...prev,
+          isHalfTime: false,
+          handled: false, // Remettre à false pour la prochaine question
+        });
+
+        // Redémarrer le timer si nécessaire ici, ou laisser `proceedToNextQuestion` le faire
+        proceedToNextQuestion(matchId);
+      }
+    }, 2000);
   });
 
   socket.on("quiz_start", async ({ matchId }) => {
