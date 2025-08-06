@@ -8,120 +8,29 @@ async function makeAIMove(matchId, io) {
   if (!match || match.isFinished || !match.quizStarted || !match.isAgainstAI)
     return;
 
+  // Vérifier pause half-time
+  const timerState = matchTimers.get(matchId);
+  if (timerState?.isHalfTime) return;
+
   const lastQuestion = match.questionsAsked.at(-1);
   if (!lastQuestion) return;
 
-  if (lastQuestion.answers.find((a) => a.playerId.equals(AI_BOT_USER_ID)))
-    return;
-
   const aiPlayerId = AI_BOT_USER_ID;
-  const isGoldenPoint = matchTimers.get(matchId)?.isGoldenPoint === true;
+
+  // IA a déjà répondu ?
+  if (lastQuestion.answers.some((a) => a.playerId.equals(aiPlayerId))) return;
+
+  const isGoldenPoint = timerState?.isGoldenPoint === true;
   const isConversion = lastQuestion.question.isConversion === true;
 
+  // Conversion : vérifier si l'IA doit répondre
   if (isConversion) {
     const humanAnswered = lastQuestion.answers.some(
-      (a) => a.playerId.toString() !== AI_BOT_USER_ID.toString()
+      (a) => !a.playerId.equals(aiPlayerId)
     );
-    if (humanAnswered) {
-      return; // Un humain a déjà répondu à la conversion, l'IA ne doit pas répondre
-    }
-  }
-  // Gestion GOLDEN POINT
-  if (isGoldenPoint) {
-    const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
-    const willAnswerCorrectly = Math.random() < accuracy;
-    const selectedOption = willAnswerCorrectly
-      ? lastQuestion.question.correctOption
-      : Object.keys(lastQuestion.question.options)
-          .filter((opt) => opt !== lastQuestion.question.correctOption)
-          .sort(() => 0.5 - Math.random())[0];
-
-    await new Promise((resolve) =>
-      setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 6000)
-    );
-
-    // Recharger le match avant modification
-    const updatedMatch = await Match.findById(matchId);
-    if (!updatedMatch) return;
-
-    const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
-    if (!lastQuestionUpdated) return;
-
-    const isCorrect =
-      selectedOption === lastQuestionUpdated.question.correctOption;
-    const score = isCorrect ? 1 : 0;
-
-    lastQuestionUpdated.answers.push({
-      playerId: aiPlayerId,
-      selectedOption,
-      isCorrect,
-      score,
-      answeredAt: new Date(),
-    });
-
-    await updatedMatch.save();
-
-    io.to(matchId).emit("answer_question", {
-      matchId,
-      playerId: aiPlayerId,
-      questionText: lastQuestionUpdated.question.text,
-      selectedOption,
-      isCorrect,
-      answeredAt: new Date(),
-    });
-
-    const freshMatch = await Match.findById(matchId)
-      .populate("creatorId")
-      .populate("joinerId");
-
-    let scoreUserOne = 0;
-    let scoreUserTwo = 0;
-    freshMatch.questionsAsked.forEach((q) => {
-      q.answers.forEach((a) => {
-        if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
-          scoreUserOne += a.score || 0;
-        } else if (
-          freshMatch.joinerId &&
-          a.playerId.toString() === freshMatch.joinerId._id.toString()
-        ) {
-          scoreUserTwo += a.score || 0;
-        }
-      });
-    });
-
-    io.to(matchId).emit("score_updated", {
-      matchId,
-      scoreUserOne,
-      scoreUserTwo,
-    });
-
-    if (isCorrect) {
-      io.to(matchId).emit("golden_point_winner", {
-        winnerId: aiPlayerId,
-        message: "🏆 GOLDEN POINT! The AI answered correctly!",
-        scoreUserOne,
-        scoreUserTwo,
-      });
-
-      clearTimeout(matchTimers.get(matchId)?.timer);
-      matchTimers.set(matchId, {
-        ...matchTimers.get(matchId),
-        handled: true,
-      });
-
-      await Match.findByIdAndUpdate(matchId, { isFinished: true });
-    }
-
-    return;
-  }
-
-  // Conversion : vérifier si c'est bien au tour de l'IA
-  if (
-    isConversion &&
-    (!lastQuestion.question.conversionPlayerId ||
-      !lastQuestion.question.conversionPlayerId.equals(aiPlayerId))
-  ) {
-    return;
+    const isConversionPlayer =
+      lastQuestion.question.conversionPlayerId?.equals(aiPlayerId);
+    if (humanAnswered || !isConversionPlayer) return;
   }
 
   const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
@@ -132,19 +41,22 @@ async function makeAIMove(matchId, io) {
         .filter((opt) => opt !== lastQuestion.question.correctOption)
         .sort(() => 0.5 - Math.random())[0];
 
-  await new Promise((resolve) =>
-    setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 8000)
-  );
+  // Vérifier half-time juste avant de répondre
+  const delay =
+    match.aiSettings?.responseDelayMs ?? (isGoldenPoint ? 6000 : 8000);
+  await new Promise((resolve) => setTimeout(resolve, delay));
 
-  const isCorrect = selectedOption === lastQuestion.question.correctOption;
-  const score = isCorrect ? (isConversion ? 2 : 4) : 0;
+  if (matchTimers.get(matchId)?.isHalfTime) return;
 
-  // Recharger le match avant modification
   const updatedMatch = await Match.findById(matchId);
   if (!updatedMatch) return;
 
   const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
   if (!lastQuestionUpdated) return;
+
+  const isCorrect =
+    selectedOption === lastQuestionUpdated.question.correctOption;
+  const score = isCorrect ? (isConversion ? 2 : isGoldenPoint ? 1 : 4) : 0;
 
   lastQuestionUpdated.answers.push({
     playerId: aiPlayerId,
@@ -173,11 +85,11 @@ async function makeAIMove(matchId, io) {
   let scoreUserTwo = 0;
   freshMatch.questionsAsked.forEach((q) => {
     q.answers.forEach((a) => {
-      if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
+      if (a.playerId.equals(freshMatch.creatorId._id)) {
         scoreUserOne += a.score || 0;
       } else if (
         freshMatch.joinerId &&
-        a.playerId.toString() === freshMatch.joinerId._id.toString()
+        a.playerId.equals(freshMatch.joinerId._id)
       ) {
         scoreUserTwo += a.score || 0;
       }
@@ -186,6 +98,26 @@ async function makeAIMove(matchId, io) {
 
   io.to(matchId).emit("score_updated", { matchId, scoreUserOne, scoreUserTwo });
 
+  // Cas GOLDEN POINT gagné
+  if (isGoldenPoint && isCorrect) {
+    io.to(matchId).emit("golden_point_winner", {
+      winnerId: aiPlayerId,
+      message: "🏆 GOLDEN POINT! The AI answered correctly!",
+      scoreUserOne,
+      scoreUserTwo,
+    });
+
+    clearTimeout(matchTimers.get(matchId)?.timer);
+    matchTimers.set(matchId, {
+      ...matchTimers.get(matchId),
+      handled: true,
+    });
+
+    await Match.findByIdAndUpdate(matchId, { isFinished: true });
+    return;
+  }
+
+  // Cas CONVERSION
   if (isConversion) {
     const teamTitle =
       aiPlayerId.toString() === match.creatorId.toString()
@@ -200,7 +132,10 @@ async function makeAIMove(matchId, io) {
         : `${teamTitle} CONVERSION UNSUCCESSFUL`,
     });
 
+    // Attendre puis passer à la prochaine question
     setTimeout(async () => {
+      if (matchTimers.get(matchId)?.isHalfTime) return;
+
       const updatedMatch2 = await Match.findById(matchId);
       const nextIndex = updatedMatch2.questionsAsked.length;
 
@@ -243,18 +178,17 @@ async function makeAIMove(matchId, io) {
         },
       });
 
-      // 👉 L’IA rejoue automatiquement si c’est un match IA
       if (match.isAgainstAI) {
         setTimeout(() => {
-          makeAIMove(matchId, io);
+          if (!matchTimers.get(matchId)?.isHalfTime) {
+            makeAIMove(matchId, io);
+          }
         }, 1000);
       }
     }, 1000);
 
     return;
   }
-
-  // Cas normal : rien à faire, `handleAnswerQuestion` prendra le relais côté joueur
 }
 
 async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
@@ -573,28 +507,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
     // Passage à la question suivante si tous ont répondu
     if (lastQuestionUpdated.answers.length >= 1) {
       setTimeout(async () => {
-        const updatedMatch3 = await Match.findById(matchId);
-        const nextIndex = updatedMatch3.questionsAsked.length;
-        const totalQuestions = Quizz.length;
-
-        const isHalfTime =
-          !updatedMatch3.halfTimeTriggered &&
-          nextIndex >= Math.floor(totalQuestions / 2);
-
-        if (isHalfTime) {
-          updatedMatch3.halfTimeTriggered = true;
-          await updatedMatch3.save();
-
-          io.to(matchId).emit("half_time", {
-            message: "⏸️ HALF-TIME! Quick break!",
-          });
-
-          setTimeout(() => {
-            proceedToNextQuestion(matchId, io, userId);
-          }, 1000);
-        } else {
-          proceedToNextQuestion(matchId, io, userId);
-        }
+        proceedToNextQuestion(matchId, io, userId);
       }, 1000);
     }
   } catch (error) {
