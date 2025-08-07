@@ -831,13 +831,13 @@ io.on("connection", (socket) => {
         clearTimeout(timerState.timer);
         matchTimers.delete(matchId);
       }
-      io.in(matchId).socketsLeave(matchId);
 
       // ✅ Notifier tous les joueurs que le match est terminé à cause du départ
       io.to(matchId.toString()).emit("match_finished_due_to_leave", {
         matchId,
         leaverId: userId,
       });
+      io.in(matchId).socketsLeave(matchId);
     } catch (error) {
       console.error("❌ Erreur dans player_leave_match :", error);
       socket.emit("error", {

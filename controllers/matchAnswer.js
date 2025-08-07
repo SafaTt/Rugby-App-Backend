@@ -5,8 +5,15 @@ const matchTimers = new Map();
 
 async function makeAIMove(matchId, io) {
   const match = await Match.findById(matchId);
-  if (!match || match.isFinished || !match.quizStarted || !match.isAgainstAI)
+  if (
+    !match ||
+    match.isFinished ||
+    match.leaverId ||
+    !match.quizStarted ||
+    !match.isAgainstAI
+  ) {
     return;
+  }
 
   // Vérifier pause half-time
   const timerState = matchTimers.get(matchId);
