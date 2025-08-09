@@ -53,6 +53,154 @@ app.set("io", io);
 io.on("connection", (socket) => {
   console.log("✅ New client connected");
 
+  async function launchGoldenPointQuestion(matchId) {
+    // Nettoyer l'ancien timer s'il existe
+    const existing = matchTimers.get(matchId);
+    if (existing?.timer) clearTimeout(existing.timer);
+
+    const match = await Match.findById(matchId)
+      .populate("creatorId")
+      .populate("joinerId");
+
+    if (!match || match.isFinished) return;
+
+    // Choisir une question GOLDEN POINT aléatoire non posée
+    const goldenQuestion = getRandomQuestion(Quizz, match.questionsAsked);
+    const formatted = Array.isArray(goldenQuestion.choices)
+      ? goldenQuestion.choices.reduce((acc, choice, idx) => {
+          const letters = ["A", "B", "C", "D"];
+          acc[letters[idx]] = choice;
+          return acc;
+        }, {})
+      : goldenQuestion.choices;
+
+    match.questionsAsked.push({
+      question: {
+        text: goldenQuestion.question,
+        options: formatted,
+        correctOption: goldenQuestion.correctAnswer,
+        isConversion: false,
+        conversionPlayerId: null,
+      },
+      answers: [],
+    });
+
+    await match.save();
+
+    // Calcul scores actuels (optionnel, pour afficher)
+    let scoreUserOne = 0,
+      scoreUserTwo = 0;
+    match.questionsAsked.forEach((q) => {
+      q.answers.forEach((a) => {
+        if (a.playerId.toString() === match.creatorId._id.toString()) {
+          scoreUserOne += a.score || 0;
+        } else if (
+          match.joinerId &&
+          a.playerId.toString() === match.joinerId._id.toString()
+        ) {
+          scoreUserTwo += a.score || 0;
+        }
+      });
+    });
+
+    // Émettre l’événement de début golden point
+    io.to(matchId).emit("golden_point_started", {
+      message: "Golden point triggered",
+    });
+
+    io.to(matchId).emit("golden_point_question", {
+      question: {
+        text: goldenQuestion.question,
+        choices: formatted,
+        correctAnswer: goldenQuestion.correctAnswer,
+      },
+      scoreUserOne,
+      scoreUserTwo,
+    });
+
+    // Créer un timer 10s pour gérer fin de golden point
+    const timer = setTimeout(async () => {
+      const state = matchTimers.get(matchId);
+      if (!state) return;
+
+      const updatedMatch = await Match.findById(matchId);
+      if (!updatedMatch) return;
+
+      const last = updatedMatch.questionsAsked.at(-1);
+      const answers = last?.answers || [];
+
+      if (!state.handled) {
+        const noAnswer = answers.length === 0;
+        const allWrong = answers.every((a) => a.score === 0);
+
+        if (noAnswer || allWrong) {
+          console.log(
+            "⏰ Relancer une nouvelle question GOLDEN POINT (aucune bonne réponse)"
+          );
+
+          // Marquer la question terminée
+          matchTimers.set(matchId, {
+            ...state,
+            handled: true,
+            timer: null,
+            isGoldenPoint: true,
+          });
+
+          // Relancer golden point (attention boucle infinie possible, gérer max retry côté logique si souhaité)
+          await launchGoldenPointQuestion(matchId);
+
+          return;
+        }
+      }
+
+      // Calcul des scores finaux après réponses
+      let scoreUserOne = 0,
+        scoreUserTwo = 0;
+
+      updatedMatch.questionsAsked.forEach((q) => {
+        q.answers.forEach((a) => {
+          if (a.playerId.toString() === updatedMatch.creatorId._id.toString()) {
+            scoreUserOne += a.score || 0;
+          } else if (
+            updatedMatch.joinerId &&
+            a.playerId.toString() === updatedMatch.joinerId._id.toString()
+          ) {
+            scoreUserTwo += a.score || 0;
+          }
+        });
+      });
+
+      if (scoreUserOne === scoreUserTwo) {
+        console.log("🔁 Égalité persistante, relance golden point");
+
+        matchTimers.set(matchId, {
+          ...state,
+          handled: true,
+          timer: null,
+          isGoldenPoint: true,
+        });
+
+        await launchGoldenPointQuestion(matchId);
+      } else {
+        console.log("⏱️ Fin du match après fin du golden point");
+        io.to(matchId).emit("match_finished", {
+          message: "⏱️ End of the match after prolonged equality.",
+        });
+        io.in(matchId).socketsLeave(matchId);
+        await Match.findByIdAndUpdate(matchId, { isFinished: true });
+      }
+    }, 10000);
+
+    // Mettre à jour le matchTimers avec le nouveau timer et reset handled
+    matchTimers.set(matchId, {
+      timer,
+      handled: false,
+      isGoldenPoint: true,
+    });
+
+    return { scoreUserOne, scoreUserTwo };
+  }
+
   const markHandled = (matchId) => {
     const current = matchTimers.get(matchId);
     if (current) {
@@ -387,39 +535,62 @@ io.on("connection", (socket) => {
       const lastQuestion = match.questionsAsked.at(-1);
       if (!lastQuestion) return;
 
-      const isGoldenPoint = matchTimers.get(matchId)?.isGoldenPoint === true;
-      const isHandled = matchTimers.get(matchId)?.handled === true;
+      const timerState = matchTimers.get(matchId) || {};
+      const isGoldenPoint = timerState.isGoldenPoint === true;
+      const isHandled = timerState.handled === true;
 
-      // Si on est en GOLDEN POINT et pas encore handled
+      console.log(
+        `[answer_question] matchId=${matchId} userId=${userId} selectedOption=${selectedOption}`
+      );
+      console.log(
+        `[answer_question] isGoldenPoint=${isGoldenPoint} handled=${isHandled}`
+      );
+
+      // Bloquer toute réponse si golden point déjà handled
+      if (isGoldenPoint && isHandled) {
+        console.log(
+          `[answer_question] Golden point already handled, ignoring answer`
+        );
+        return;
+      }
+
+      // Ignore si joueur a déjà répondu à cette question
+      const alreadyAnswered = lastQuestion.answers.find(
+        (a) => a.playerId.toString() === userId.toString()
+      );
+      if (alreadyAnswered) {
+        console.log(
+          `[answer_question] User ${userId} already answered this question.`
+        );
+        return;
+      }
+
+      const isCorrect = selectedOption === lastQuestion.question.correctOption;
+
       if (isGoldenPoint && !isHandled) {
-        const isCorrect =
-          selectedOption === lastQuestion.question.correctOption;
-
+        // Réponse correcte au golden point
         if (isCorrect) {
           lastQuestion.answers.push({
             playerId: userId,
             selectedOption,
             isCorrect,
-            score: 1, // ✅ Un seul point pour GOLDEN POINT
+            score: 1,
             answeredAt: new Date(),
           });
-
           await match.save();
 
-          // Calcul des scores après golden point
-          let scoreUserOne = 0;
-          let scoreUserTwo = 0;
-
+          // Calcul scores
+          let scoreUserOne = 0,
+            scoreUserTwo = 0;
           match.questionsAsked.forEach((q) => {
             q.answers.forEach((a) => {
-              if (a.playerId.toString() === match.creatorId._id.toString()) {
+              if (a.playerId.toString() === match.creatorId._id.toString())
                 scoreUserOne += a.score || 0;
-              } else if (
+              else if (
                 match.joinerId &&
                 a.playerId.toString() === match.joinerId._id.toString()
-              ) {
+              )
                 scoreUserTwo += a.score || 0;
-              }
             });
           });
 
@@ -436,21 +607,25 @@ io.on("connection", (socket) => {
             scoreUserTwo,
           });
 
-          clearTimeout(matchTimers.get(matchId)?.timer);
+          clearTimeout(timerState.timer);
+
+          // **IMPORTANT** Mettre handled à true dès qu'on a un gagnant
           matchTimers.set(matchId, {
-            ...matchTimers.get(matchId),
+            ...timerState,
             handled: true,
           });
 
-          // Marquer le match comme terminé
           await Match.findByIdAndUpdate(matchId, {
             isFinished: true,
             status: "finished",
           });
 
-          return; // ⛔ On sort, pas de logique normale après ça
+          console.log(
+            `[answer_question] Golden point won, handled=true set, match finished.`
+          );
+          return; // fin du traitement
         } else {
-          // Mauvaise réponse pendant le golden point
+          // Mauvaise réponse au golden point
           lastQuestion.answers.push({
             playerId: userId,
             selectedOption,
@@ -458,7 +633,6 @@ io.on("connection", (socket) => {
             score: 0,
             answeredAt: new Date(),
           });
-
           await match.save();
 
           io.to(matchId).emit("wrong_golden_point_answer", {
@@ -466,7 +640,6 @@ io.on("connection", (socket) => {
             message: "❌ Wrong answer during GOLDEN POINT",
           });
 
-          // 🆕 Vérifier si tous les joueurs ont répondu et ont échoué
           const totalAnswers = lastQuestion.answers.length;
           const playersCount = match.joinerId ? 2 : 1;
           const allAnswered = totalAnswers >= playersCount;
@@ -477,29 +650,25 @@ io.on("connection", (socket) => {
               "🔁 Tous les joueurs ont échoué au GOLDEN POINT, relancer une nouvelle question..."
             );
 
+            // Marquer handled avant relance
             matchTimers.set(matchId, {
-              ...matchTimers.get(matchId),
+              ...timerState,
               handled: true,
             });
-            // Relancer une nouvelle question golden point
-            io.to(matchId).emit("golden_point_trigger", { matchId });
+
+            // Relancer directement la question sans passer par un événement client
+            await launchGoldenPointQuestion(matchId);
+
+            // Mettre handled à false avec un nouveau timer dans launchGoldenPointQuestion
+            return;
           }
 
           return;
         }
       }
-      if (isGoldenPoint && isHandled) return;
 
-      const totalAnswers = lastQuestion.answers.length;
-      const playersCount = match.joinerId ? 2 : 1;
+      // Partie normale hors golden point
 
-      // Ignore si déjà répondu
-      const alreadyAnswered = lastQuestion.answers.find(
-        (a) => a.playerId.toString() === userId.toString()
-      );
-      if (alreadyAnswered) return;
-
-      const isCorrect = selectedOption === lastQuestion.question.correctOption;
       const isConversion = lastQuestion.question.isConversion === true;
       const isConversionPlayer =
         isConversion &&
@@ -527,11 +696,12 @@ io.on("connection", (socket) => {
       }
       // ** fin nouvelle partie **
 
-      // Marquer handled pour stopper timer d'attente
-      const currentTimerState = matchTimers.get(matchId);
+      // Gestion du flag handled si tous ont répondu (pour stopper timer)
+      const totalAnswers = lastQuestion.answers.length;
+      const playersCount = match.joinerId ? 2 : 1;
       if (totalAnswers >= playersCount) {
         matchTimers.set(matchId, {
-          ...currentTimerState,
+          ...timerState,
           handled: true,
         });
         console.log(
@@ -575,7 +745,7 @@ io.on("connection", (socket) => {
         scoreUserTwo,
       });
 
-      // Si conversion, afficher résultat + passer à la suite après délai
+      // Gestion conversion
       if (isConversion && isConversionPlayer) {
         const teamTitle =
           userId.toString() === match.creatorId.toString()
@@ -602,7 +772,6 @@ io.on("connection", (socket) => {
               message: "The quiz is over! Thank you for playing.",
             });
             io.in(matchId).socketsLeave(matchId);
-
             return;
           }
 
@@ -636,7 +805,7 @@ io.on("connection", (socket) => {
           });
         }, 4000);
 
-        return; // Important pour ne pas continuer la suite
+        return;
       }
 
       // Notifier bonnes réponses normales
@@ -690,7 +859,7 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // On lance la prochaine question **sans attendre tout le monde** si besoin, ou dès que tous ont répondu
+      // Lancer prochaine question sans attendre tout le monde (si besoin)
       if (totalAnswers >= 1) {
         setTimeout(() => {
           proceedToNextQuestion(matchId);
@@ -859,89 +1028,38 @@ io.on("connection", (socket) => {
   });
 
   // ✅ GOLDEN POINT event
-  socket.on("golden_point_trigger", async ({ matchId }) => {
+  socket.on("golden_point_trigger", async ({ matchId, force = false }) => {
     try {
-      const match = await Match.findById(matchId)
-        .populate("creatorId")
-        .populate("joinerId");
-
-      if (!match || match.isFinished) return;
-
       const existingTimer = matchTimers.get(matchId);
-      const lastQuestion = match.questionsAsked.at(-1);
 
-      if (existingTimer?.isGoldenPoint && !existingTimer?.handled) {
-        console.log("🛑 Une question GOLDEN POINT est en cours. Attente...");
+      // Modifier la condition pour ignorer le trigger uniquement si pas de force
+      if (existingTimer?.isGoldenPoint && !existingTimer.handled && !force) {
+        console.log(
+          `[golden_point_trigger] Question ongoing, ignoring trigger`
+        );
         return;
       }
 
-      // Recalculer les scores
-      let scoreUserOne = 0;
-      let scoreUserTwo = 0;
+      // Plus de limite retryCount supprimée
 
-      match.questionsAsked.forEach((q) => {
-        q.answers.forEach((a) => {
-          if (a.playerId.toString() === match.creatorId._id.toString()) {
-            scoreUserOne += a.score || 0;
-          } else if (
-            match.joinerId &&
-            a.playerId.toString() === match.joinerId._id.toString()
-          ) {
-            scoreUserTwo += a.score || 0;
-          }
-        });
-      });
+      // Lancer la question golden point (fonctions à adapter selon ton code)
+      await launchGoldenPointQuestion(matchId);
 
-      // Ne lancer golden point que si égalité parfaite
-      if (scoreUserOne !== scoreUserTwo) return;
-
-      // Choisir et formater la question golden point
-      const goldenQuestion = getRandomQuestion(Quizz, match.questionsAsked);
-      const formatted = Array.isArray(goldenQuestion.choices)
-        ? goldenQuestion.choices.reduce((acc, choice, idx) => {
-            const letters = ["A", "B", "C", "D"];
-            acc[letters[idx]] = choice;
-            return acc;
-          }, {})
-        : goldenQuestion.choices;
-
-      match.questionsAsked.push({
-        question: {
-          text: goldenQuestion.question,
-          options: formatted,
-          correctOption: goldenQuestion.correctAnswer,
-          isConversion: false,
-          conversionPlayerId: null,
-        },
-        answers: [],
-      });
-
-      await match.save();
-
-      io.to(matchId).emit("golden_point_started", {
-        message: "Golden point triggered",
-      });
-
-      io.to(matchId).emit("golden_point_question", {
-        question: {
-          text: goldenQuestion.question,
-          choices: formatted,
-          correctAnswer: goldenQuestion.correctAnswer,
-        },
-        scoreUserOne,
-        scoreUserTwo,
-      });
-
-      // Timer GOLDEN POINT (10s)
+      // Nettoyer ancien timer
       if (existingTimer?.timer) clearTimeout(existingTimer.timer);
+
+      // Créer timer 10s pour attendre réponses
       const timer = setTimeout(async () => {
         const state = matchTimers.get(matchId);
+        if (!state) return;
+
         const updatedMatch = await Match.findById(matchId);
+        if (!updatedMatch) return;
+
         const last = updatedMatch.questionsAsked.at(-1);
+        const answers = last?.answers || [];
 
-        if (!state?.handled) {
-          const answers = last?.answers || [];
-
+        if (!state.handled) {
           const noAnswer = answers.length === 0;
           const allWrong = answers.every((a) => a.score === 0);
 
@@ -950,16 +1068,31 @@ io.on("connection", (socket) => {
               "⏰ Relancer une nouvelle question GOLDEN POINT (aucune bonne réponse)"
             );
 
-            markHandled(matchId);
+            // Marquer la question traitée (handled = true)
+            matchTimers.set(matchId, {
+              ...state,
+              handled: true,
+              timer: null,
+              isGoldenPoint: true,
+            });
 
-            io.to(matchId).emit("golden_point_trigger", { matchId });
+            // Relancer directement la question golden point (pas via émission socket)
+            await launchGoldenPointQuestion(matchId);
+
+            // Reset handled = false et timer dans matchTimers pour la nouvelle question
+            matchTimers.set(matchId, {
+              timer,
+              handled: false,
+              isGoldenPoint: true,
+            });
+
             return;
           }
         }
 
-        // Vérifier les scores pour finir la partie
-        let scoreUserOne = 0;
-        let scoreUserTwo = 0;
+        // Calcul scores après timeout
+        let scoreUserOne = 0,
+          scoreUserTwo = 0;
 
         updatedMatch.questionsAsked.forEach((q) => {
           q.answers.forEach((a) => {
@@ -977,8 +1110,25 @@ io.on("connection", (socket) => {
         });
 
         if (scoreUserOne === scoreUserTwo) {
-          io.to(matchId).emit("golden_point_trigger", { matchId });
+          console.log("🔁 Égalité persistante, relance golden point");
+
+          matchTimers.set(matchId, {
+            ...state,
+            handled: true,
+            timer: null,
+            isGoldenPoint: true,
+          });
+
+          // Relance directe
+          await launchGoldenPointQuestion(matchId);
+
+          matchTimers.set(matchId, {
+            timer,
+            handled: false,
+            isGoldenPoint: true,
+          });
         } else {
+          console.log("⏱️ Fin du match après fin du golden point");
           io.to(matchId).emit("match_finished", {
             message: "⏱️ End of the match after prolonged equality.",
           });
@@ -987,7 +1137,7 @@ io.on("connection", (socket) => {
         }
       }, 10000);
 
-      // Mise à jour du timer state local (indique qu'on est en golden point)
+      // Mettre à jour timer et reset handled à false car nouvelle question lancée
       matchTimers.set(matchId, {
         timer,
         handled: false,
