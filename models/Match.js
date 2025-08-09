@@ -80,6 +80,10 @@ const matchSchema = new mongoose.Schema(
         default: 2000,
       },
     },
+    isGoldenPoint: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );
