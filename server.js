@@ -690,7 +690,7 @@ io.on("connection", (socket) => {
       // ** Nouvelle partie ajoutée : appel à makeAIMove si IA dans le match **
       if (
         match.isAgainstAI &&
-        userId.toString() === match.creatorId.toString()
+        userId.toString() === match.creatorId._id.toString()
       ) {
         await makeAIMove(matchId, io);
       }
@@ -745,7 +745,7 @@ io.on("connection", (socket) => {
         scoreUserTwo,
       });
 
-      // Gestion conversion
+      // Gestion conversion (réponse à une question conversion)
       if (isConversion && isConversionPlayer) {
         const teamTitle =
           userId.toString() === match.creatorId.toString()
@@ -803,7 +803,7 @@ io.on("connection", (socket) => {
               correctAnswer: nextQ.correctAnswer,
             },
           });
-        }, 4000);
+        }, 9000);
 
         return;
       }
@@ -811,7 +811,7 @@ io.on("connection", (socket) => {
       // Notifier bonnes réponses normales
       if (isCorrect && !isConversion) {
         const teamTitle =
-          userId.toString() === match.creatorId.toString()
+          userId.toString() === match.creatorId._id.toString()
             ? match.playerOneTeam.title
             : match.playerTwoTeam?.title || "Team";
 
@@ -820,6 +820,8 @@ io.on("connection", (socket) => {
           message: `Try ${teamTitle} !`,
         });
 
+        // Au lieu d'injecter directement la conversion ici dans match.questionsAsked,
+        // on la place dans matchTimers.pendingConversion et on l'émet directement.
         setTimeout(async () => {
           const convQ =
             Quizz.find((q) => q.isConversion) ||
@@ -833,19 +835,23 @@ io.on("connection", (socket) => {
               }, {})
             : convQ.choices;
 
-          match.questionsAsked.push({
-            question: {
-              text: convQ.question,
-              options: formattedConvOptions,
-              correctOption: convQ.correctAnswer,
-              isConversion: true,
-              conversionPlayerId: userId,
+          // Mettre en attente la conversion dans matchTimers
+          matchTimers.set(matchId, {
+            ...timerState,
+            pendingConversion: {
+              question: {
+                text: convQ.question,
+                options: formattedConvOptions,
+                correctOption: convQ.correctAnswer,
+                isConversion: true,
+                conversionPlayerId: userId,
+              },
+              answers: [],
             },
-            answers: [],
+            handled: false,
           });
 
-          await match.save();
-
+          // Émettre la conversion immédiatement
           io.to(matchId).emit("conversion_question", {
             playerId: userId,
             question: {
@@ -854,16 +860,74 @@ io.on("connection", (socket) => {
               correctAnswer: convQ.correctAnswer,
             },
           });
-        }, 3000);
+        }, 1000);
 
         return;
       }
 
       // Lancer prochaine question sans attendre tout le monde (si besoin)
+      // Lancer prochaine question sans attendre tout le monde (si besoin)
       if (totalAnswers >= 1) {
-        setTimeout(() => {
-          proceedToNextQuestion(matchId);
-        }, 1000);
+        // Si c'est une conversion, gérer le timer 10s comme avant
+        if (isConversion) {
+          if (!timerState.conversionTimeout) {
+            const timeout = setTimeout(() => {
+              proceedToNextQuestion(matchId);
+              const currentState = matchTimers.get(matchId) || {};
+              delete currentState.conversionTimeout;
+              matchTimers.set(matchId, currentState);
+            }, 10000);
+
+            matchTimers.set(matchId, {
+              ...timerState,
+              conversionTimeout: timeout,
+            });
+
+            console.log(
+              `[answer_question] Timer conversion 10s lancé pour matchId=${matchId}`
+            );
+          }
+        } else {
+          // C'est une question normale
+
+          const playersCount = match.joinerId ? 2 : 1;
+          const totalIncorrectAnswers = lastQuestion.answers.filter(
+            (a) => !a.isCorrect
+          ).length;
+
+          if (playersCount === 2) {
+            // S'il y a 2 joueurs et qu'une seule mauvaise réponse est reçue, on attend 10 secondes pour que le 2ème joueur réponde
+            if (totalIncorrectAnswers === 1 && totalAnswers < playersCount) {
+              if (!timerState.waitingSecondPlayerTimeout) {
+                const timeout = setTimeout(() => {
+                  proceedToNextQuestion(matchId);
+                  const currentState = matchTimers.get(matchId) || {};
+                  delete currentState.waitingSecondPlayerTimeout;
+                  matchTimers.set(matchId, currentState);
+                }, 10000);
+
+                matchTimers.set(matchId, {
+                  ...timerState,
+                  waitingSecondPlayerTimeout: timeout,
+                });
+
+                console.log(
+                  `[answer_question] Attente 10s pour réponse 2ème joueur sur matchId=${matchId}`
+                );
+              }
+            } else {
+              // Sinon, tous ont répondu ou aucune mauvaise réponse, on lance la question suivante rapidement
+              setTimeout(() => {
+                proceedToNextQuestion(matchId);
+              }, 1000);
+            }
+          } else {
+            // Un seul joueur, on lance directement la question suivante
+            setTimeout(() => {
+              proceedToNextQuestion(matchId);
+            }, 1000);
+          }
+        }
       }
     } catch (error) {
       console.error("❌ Erreur socket answer_question:", error);

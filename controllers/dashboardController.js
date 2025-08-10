@@ -25,9 +25,17 @@ const getUserDashboardStats = async (req, res) => {
     });
 
     if (!matches.length) {
-      return res
-        .status(404)
-        .json({ message: "Aucun match trouvé pour cet utilisateur." });
+      const user = await User.findById(userId).select("pseudo");
+      return res.json({
+        pseudo: user?.pseudo || "Unknown",
+        totalMatches: 0,
+        totalWins: 0,
+        totalLosses: 0,
+        bestScore: 0,
+        teams: [],
+        rank: null,
+        matchHistory: [],
+      });
     }
 
     let totalMatches = matches.length;
@@ -147,9 +155,10 @@ const getUserTeamStats = async (req, res) => {
     });
 
     if (!matches.length) {
-      return res
-        .status(404)
-        .json({ message: "Aucun match trouvé pour cet utilisateur." });
+      return res.json({
+        userId,
+        teamStats: [],
+      });
     }
 
     const teamStatsMap = new Map();
