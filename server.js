@@ -53,6 +53,34 @@ app.set("io", io);
 io.on("connection", (socket) => {
   console.log("✅ New client connected");
 
+  const updateScores = async (matchId) => {
+    const match = await Match.findById(matchId)
+      .populate("creatorId")
+      .populate("joinerId");
+
+    let scoreUserOne = 0;
+    let scoreUserTwo = 0;
+
+    match.questionsAsked.forEach((q) => {
+      q.answers.forEach((a) => {
+        if (a.playerId.toString() === match.creatorId._id.toString()) {
+          scoreUserOne += a.score || 0;
+        } else if (
+          match.joinerId &&
+          a.playerId.toString() === match.joinerId._id.toString()
+        ) {
+          scoreUserTwo += a.score || 0;
+        }
+      });
+    });
+
+    io.to(matchId).emit("score_updated", {
+      matchId,
+      scoreUserOne,
+      scoreUserTwo,
+    });
+  };
+
   async function launchGoldenPointQuestion(matchId) {
     // Nettoyer l'ancien timer s'il existe
     const existing = matchTimers.get(matchId);
@@ -273,7 +301,7 @@ io.on("connection", (socket) => {
     if (callback) callback();
   });
 
-  const proceedToNextQuestion = async (matchId) => {
+  const proceedToNextQuestion = async (matchId, options = {}) => {
     const match = await Match.findById(matchId);
     if (!match || match.isFinished || !match.quizStarted) return;
 
@@ -282,6 +310,17 @@ io.on("connection", (socket) => {
 
     // Bloquer si golden point actif
     if (timerState.isGoldenPoint && !timerState.handled) return;
+
+    // ⚡ Bloquer l’injection multiple après half-time
+    if (options.afterHalfTime && timerState.halfTimeNextQuestionSent) return;
+
+    if (options.afterHalfTime) {
+      // marquer qu'on a déjà envoyé la question du half-time
+      matchTimers.set(matchId, {
+        ...timerState,
+        halfTimeNextQuestionSent: true,
+      });
+    }
 
     // ⚡ Si une conversion est en attente, on l’injecte et on attend 10s
     if (timerState.pendingConversion) {
@@ -520,29 +559,17 @@ io.on("connection", (socket) => {
         `[answer_question] isGoldenPoint=${isGoldenPoint} handled=${isHandled}`
       );
 
-      // Bloquer toute réponse si golden point déjà handled
-      if (isGoldenPoint && isHandled) {
-        console.log(
-          `[answer_question] Golden point already handled, ignoring answer`
-        );
-        return;
-      }
+      if (isGoldenPoint && isHandled) return;
 
-      // Ignore si joueur a déjà répondu à cette question
       const alreadyAnswered = lastQuestion.answers.find(
         (a) => a.playerId.toString() === userId.toString()
       );
-      if (alreadyAnswered) {
-        console.log(
-          `[answer_question] User ${userId} already answered this question.`
-        );
-        return;
-      }
+      if (alreadyAnswered) return;
 
       const isCorrect = selectedOption === lastQuestion.question.correctOption;
 
+      // ----- Gestion Golden Point -----
       if (isGoldenPoint && !isHandled) {
-        // Réponse correcte au golden point
         if (isCorrect) {
           lastQuestion.answers.push({
             playerId: userId,
@@ -553,7 +580,6 @@ io.on("connection", (socket) => {
           });
           await match.save();
 
-          // Calcul scores
           let scoreUserOne = 0,
             scoreUserTwo = 0;
           match.questionsAsked.forEach((q) => {
@@ -581,25 +607,31 @@ io.on("connection", (socket) => {
             scoreUserTwo,
           });
 
+          // 🔹 Appel à updateScores
+          await updateScores(
+            matchId,
+            match.creatorId._id.toString(),
+            scoreUserOne
+          );
+          if (match.joinerId) {
+            await updateScores(
+              matchId,
+              match.joinerId._id.toString(),
+              scoreUserTwo
+            );
+          }
+
           clearTimeout(timerState.timer);
 
-          // **IMPORTANT** Mettre handled à true dès qu'on a un gagnant
-          matchTimers.set(matchId, {
-            ...timerState,
-            handled: true,
-          });
+          matchTimers.set(matchId, { ...timerState, handled: true });
 
           await Match.findByIdAndUpdate(matchId, {
             isFinished: true,
             status: "finished",
           });
 
-          console.log(
-            `[answer_question] Golden point won, handled=true set, match finished.`
-          );
-          return; // fin du traitement
+          return;
         } else {
-          // Mauvaise réponse au golden point
           lastQuestion.answers.push({
             playerId: userId,
             selectedOption,
@@ -620,20 +652,8 @@ io.on("connection", (socket) => {
           const allIncorrect = lastQuestion.answers.every((a) => !a.isCorrect);
 
           if (allAnswered && allIncorrect) {
-            console.log(
-              "🔁 Tous les joueurs ont échoué au GOLDEN POINT, relancer une nouvelle question..."
-            );
-
-            // Marquer handled avant relance
-            matchTimers.set(matchId, {
-              ...timerState,
-              handled: true,
-            });
-
-            // Relancer directement la question sans passer par un événement client
+            matchTimers.set(matchId, { ...timerState, handled: true });
             await launchGoldenPointQuestion(matchId);
-
-            // Mettre handled à false avec un nouveau timer dans launchGoldenPointQuestion
             return;
           }
 
@@ -641,14 +661,12 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Partie normale hors golden point
-
+      // ----- Partie normale hors Golden Point -----
       const isConversion = lastQuestion.question.isConversion === true;
       const isConversionPlayer =
         isConversion &&
         lastQuestion.question.conversionPlayerId?.toString() ===
           userId.toString();
-
       const scoreToAdd = isCorrect ? (isConversion ? 2 : 4) : 0;
 
       lastQuestion.answers.push({
@@ -661,26 +679,17 @@ io.on("connection", (socket) => {
 
       await match.save();
 
-      // ** Nouvelle partie ajoutée : appel à makeAIMove si IA dans le match **
       if (
         match.isAgainstAI &&
         userId.toString() === match.creatorId._id.toString()
       ) {
         await makeAIMove(matchId, io);
       }
-      // ** fin nouvelle partie **
 
-      // Gestion du flag handled si tous ont répondu (pour stopper timer)
       const totalAnswers = lastQuestion.answers.length;
       const playersCount = match.joinerId ? 2 : 1;
       if (totalAnswers >= playersCount) {
-        matchTimers.set(matchId, {
-          ...timerState,
-          handled: true,
-        });
-        console.log(
-          `🔒 Tous les joueurs ont répondu, handled=true pour matchId=${matchId}`
-        );
+        matchTimers.set(matchId, { ...timerState, handled: true });
       }
 
       io.to(matchId).emit("answer_question", {
@@ -692,7 +701,7 @@ io.on("connection", (socket) => {
         answeredAt: new Date(),
       });
 
-      // Recalcul scores
+      // 🔹 Recalcul des scores et mise à jour avec updateScores
       const freshMatch = await Match.findById(matchId)
         .populate("creatorId")
         .populate("joinerId");
@@ -719,7 +728,20 @@ io.on("connection", (socket) => {
         scoreUserTwo,
       });
 
-      // Gestion conversion (réponse à une question conversion)
+      await updateScores(
+        matchId,
+        freshMatch.creatorId._id.toString(),
+        scoreUserOne
+      );
+      if (freshMatch.joinerId) {
+        await updateScores(
+          matchId,
+          freshMatch.joinerId._id.toString(),
+          scoreUserTwo
+        );
+      }
+
+      // ----- Gestion Conversion -----
       if (isConversion && isConversionPlayer) {
         const teamTitle =
           userId.toString() === match.creatorId.toString()
@@ -782,7 +804,7 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Notifier bonnes réponses normales
+      // ----- Gestion des réponses normales et conversion pending -----
       if (isCorrect && !isConversion) {
         const teamTitle =
           userId.toString() === match.creatorId._id.toString()
@@ -794,8 +816,6 @@ io.on("connection", (socket) => {
           message: `Try ${teamTitle} !`,
         });
 
-        // Au lieu d'injecter directement la conversion ici dans match.questionsAsked,
-        // on la place dans matchTimers.pendingConversion et on l'émet directement.
         setTimeout(async () => {
           const convQ =
             Quizz.find((q) => q.isConversion) ||
@@ -809,7 +829,6 @@ io.on("connection", (socket) => {
               }, {})
             : convQ.choices;
 
-          // Mettre en attente la conversion dans matchTimers
           matchTimers.set(matchId, {
             ...timerState,
             pendingConversion: {
@@ -825,7 +844,6 @@ io.on("connection", (socket) => {
             handled: false,
           });
 
-          // Émettre la conversion immédiatement
           io.to(matchId).emit("conversion_question", {
             playerId: userId,
             question: {
@@ -839,10 +857,8 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Lancer prochaine question sans attendre tout le monde (si besoin)
-      // Lancer prochaine question sans attendre tout le monde (si besoin)
+      // ----- Lancer prochaine question selon logique existante -----
       if (totalAnswers >= 1) {
-        // Si c'est une conversion, gérer le timer 10s comme avant
         if (isConversion) {
           if (!timerState.conversionTimeout) {
             const timeout = setTimeout(() => {
@@ -856,21 +872,13 @@ io.on("connection", (socket) => {
               ...timerState,
               conversionTimeout: timeout,
             });
-
-            console.log(
-              `[answer_question] Timer conversion 10s lancé pour matchId=${matchId}`
-            );
           }
         } else {
-          // C'est une question normale
-
-          const playersCount = match.joinerId ? 2 : 1;
           const totalIncorrectAnswers = lastQuestion.answers.filter(
             (a) => !a.isCorrect
           ).length;
 
           if (playersCount === 2) {
-            // S'il y a 2 joueurs et qu'une seule mauvaise réponse est reçue, on attend 10 secondes pour que le 2ème joueur réponde
             if (totalIncorrectAnswers === 1 && totalAnswers < playersCount) {
               if (!timerState.waitingSecondPlayerTimeout) {
                 const timeout = setTimeout(() => {
@@ -884,19 +892,13 @@ io.on("connection", (socket) => {
                   ...timerState,
                   waitingSecondPlayerTimeout: timeout,
                 });
-
-                console.log(
-                  `[answer_question] Attente 10s pour réponse 2ème joueur sur matchId=${matchId}`
-                );
               }
             } else {
-              // Sinon, tous ont répondu ou aucune mauvaise réponse, on lance la question suivante rapidement
               setTimeout(() => {
                 proceedToNextQuestion(matchId);
               }, 1000);
             }
           } else {
-            // Un seul joueur, on lance directement la question suivante
             setTimeout(() => {
               proceedToNextQuestion(matchId);
             }, 1000);
@@ -915,13 +917,19 @@ io.on("connection", (socket) => {
     match.halfTimeTriggered = true;
     await match.save();
 
-    const timerState = matchTimers.get(matchId);
+    const timerState = matchTimers.get(matchId) || {};
     if (timerState?.timer) clearTimeout(timerState.timer);
+
+    // Ajouter un flag pour gérer la prochaine question
+    matchTimers.set(matchId, {
+      ...timerState,
+      halfTimeNextQuestionSent: false,
+    });
 
     io.to(matchId).emit("half_time", { message: "⏸️ HALF-TIME! Quick break!" });
 
     setTimeout(() => {
-      proceedToNextQuestion(matchId);
+      proceedToNextQuestion(matchId, { afterHalfTime: true });
     }, 5000);
   });
 
