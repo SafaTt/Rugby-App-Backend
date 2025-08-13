@@ -275,28 +275,20 @@ io.on("connection", (socket) => {
 
   const proceedToNextQuestion = async (matchId) => {
     const match = await Match.findById(matchId);
-    if (!match || match.isFinished || !match.quizStarted) {
-      console.log("🚫 Match non valide pour continuer la partie");
-      return;
-    }
+    if (!match || match.isFinished || !match.quizStarted) return;
 
+    const timerState = matchTimers.get(matchId) || {};
     let justInjectedConversion = false;
-    const timerState = matchTimers.get(matchId);
 
-    if (timerState?.isGoldenPoint && !timerState?.handled) {
-      console.log(
-        "🟠 Golden point en cours, on ne lance pas de question normale."
-      );
-      return;
-    }
-    // Si conversion en attente, on l'injecte
-    if (timerState?.pendingConversion) {
+    // Bloquer si golden point actif
+    if (timerState.isGoldenPoint && !timerState.handled) return;
+
+    // ⚡ Si une conversion est en attente, on l’injecte et on attend 10s
+    if (timerState.pendingConversion) {
+      // Si un timer de conversion existe déjà, on ne fait rien
+      if (timerState.conversionTimeout) return;
+
       const convQuestion = timerState.pendingConversion;
-
-      convQuestion.question.text = convQuestion.question.text || "MISSING_TEXT";
-      convQuestion.question.options = convQuestion.question.options || {};
-      convQuestion.question.correctOption =
-        convQuestion.question.correctOption || null;
       convQuestion.question.isConversion = true;
 
       match.questionsAsked.push(convQuestion);
@@ -304,19 +296,41 @@ io.on("connection", (socket) => {
       justInjectedConversion = true;
 
       if (timerState.timer) clearTimeout(timerState.timer);
-      matchTimers.set(matchId, {
-        ...timerState,
-        handled: true,
-        pendingConversion: null,
+
+      io.to(matchId).emit("conversion_question", {
+        playerId: convQuestion.question.conversionPlayerId,
+        question: {
+          text: convQuestion.question.text,
+          choices: convQuestion.question.options,
+          correctAnswer: convQuestion.question.correctOption,
+        },
       });
 
-      console.log("🔁 Conversion injectée par timeout");
-      // On continue la suite (sans return ici)
+      // Timer 10s pour passer à la question suivante
+      const conversionTimeout = setTimeout(async () => {
+        const state = matchTimers.get(matchId) || {};
+        if (state?.pendingConversion) {
+          delete state.pendingConversion;
+          delete state.conversionTimeout;
+          markHandled(matchId);
+          matchTimers.set(matchId, state);
+          await proceedToNextQuestion(matchId);
+        }
+      }, 10000);
+
+      matchTimers.set(matchId, {
+        ...timerState,
+        conversionTimeout,
+        handled: false,
+      });
+
+      console.log("⏳ Conversion injectée, timer 10s lancé");
+      return;
     }
 
     // Nouvelle question normale
-    const next = getRandomQuestion(Quizz, match.questionsAsked);
-    if (!next) {
+    const nextQ = getRandomQuestion(Quizz, match.questionsAsked);
+    if (!nextQ) {
       match.isFinished = true;
       match.status = "finished";
       await match.save();
@@ -326,19 +340,18 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const formatted = Array.isArray(next.choices)
-      ? next.choices.reduce((acc, choice, idx) => {
+    const formattedOptions = Array.isArray(nextQ.choices)
+      ? nextQ.choices.reduce((acc, choice, idx) => {
           const letters = ["A", "B", "C", "D"];
           acc[letters[idx]] = choice;
           return acc;
         }, {})
-      : next.choices;
+      : nextQ.choices;
 
     const lastQuestionIndex = match.questionsAsked.length - 1;
     const previousQuestion =
       lastQuestionIndex >= 0 ? match.questionsAsked[lastQuestionIndex] : null;
 
-    // Détecter si on doit lancer une conversion
     let launchConversion = false;
     let playerIdToConvert = null;
 
@@ -347,104 +360,65 @@ io.on("connection", (socket) => {
       !justInjectedConversion &&
       !previousQuestion.question.isConversion
     ) {
-      const state = matchTimers.get(matchId);
-      if (state?.firstCorrectPlayer) {
+      if (timerState.firstCorrectPlayer) {
         launchConversion = true;
-        playerIdToConvert = state.firstCorrectPlayer;
+        playerIdToConvert = timerState.firstCorrectPlayer;
       }
     }
 
     const newQuestion = {
       question: {
-        text: next.question,
-        options: formatted,
-        correctOption: next.correctAnswer,
+        text: nextQ.question,
+        options: formattedOptions,
+        correctOption: nextQ.correctAnswer,
         isConversion: false,
         conversionPlayerId: null,
       },
       answers: [],
     };
 
+    // ⚡ Conversion immédiate si un joueur correct
     if (launchConversion) {
-      io.to(matchId.toString()).emit("conversion_question", {
-        playerId: playerIdToConvert,
-        question: {
-          text: next.question,
-          choices: formatted,
-          correctAnswer: next.correctAnswer,
-        },
-      });
-
-      // Clear ancien timer
-      if (matchTimers.has(matchId)) {
-        const old = matchTimers.get(matchId);
-        if (old?.timer) clearTimeout(old.timer);
-      }
-
-      // Timer conversion 10s
-      const timer = setTimeout(async () => {
-        const refreshedMatch = await Match.findById(matchId);
-        if (refreshedMatch?.isFinished) return;
-
-        const state = matchTimers.get(matchId);
-        if (!state?.handled) {
-          console.log("Etat au timeout :", state);
-
-          console.log(
-            "⏱️ Timeout conversion : aucune réponse → passer à la question suivante"
-          );
-          markHandled(matchId);
-          proceedToNextQuestion(matchId);
-        }
-      }, 10000);
-
       matchTimers.set(matchId, {
-        timer,
-        handled: false,
+        ...timerState,
         pendingConversion: {
           question: {
-            text: next.question,
-            options: formatted,
-            correctOption: next.correctAnswer,
+            ...newQuestion.question,
             isConversion: true,
             conversionPlayerId: playerIdToConvert,
           },
           answers: [],
         },
+        handled: false,
       });
-
-      return; // On attend la conversion avant d'envoyer une question normale suivante
+      return await proceedToNextQuestion(matchId); // Récursif pour injecter conversion
     }
 
-    // Sinon on ajoute la question normale
+    // Sinon on envoie question normale
     match.questionsAsked.push(newQuestion);
     await match.save();
 
-    // Nettoyer ancien timer s’il existe
-    const prev = matchTimers.get(matchId);
-    if (prev?.timer) clearTimeout(prev.timer);
+    if (timerState.timer) clearTimeout(timerState.timer);
 
     io.to(matchId).emit("next_question", {
       question: {
-        text: next.question,
-        choices: formatted,
-        correctAnswer: next.correctAnswer,
+        text: nextQ.question,
+        choices: formattedOptions,
+        correctAnswer: nextQ.correctAnswer,
       },
     });
 
-    // Lancer timer après avoir émis la question
     console.log("🧭 Timer lancé pour une nouvelle question normale");
 
+    // Timer normal 10s pour passer à la suivante
     const timer = setTimeout(() => {
-      console.log("🔔 Timer terminé, vérification handled...");
       const state = matchTimers.get(matchId);
-      if (!state?.handled) {
+      if (!state?.handled && !state?.pendingConversion) {
         markHandled(matchId);
         proceedToNextQuestion(matchId);
       }
     }, 10000);
 
-    // ✅ Mise à jour *complète* et *unique*
     matchTimers.set(matchId, {
       timer,
       handled: false,
@@ -942,35 +916,13 @@ io.on("connection", (socket) => {
     await match.save();
 
     const timerState = matchTimers.get(matchId);
-    if (timerState) {
-      // Marquer que c’est pause half-time
-      matchTimers.set(matchId, {
-        ...timerState,
-        isHalfTime: true,
-      });
+    if (timerState?.timer) clearTimeout(timerState.timer);
 
-      // Stopper le timer de la question en cours s’il existe
-      clearTimeout(timerState.timer);
-    }
+    io.to(matchId).emit("half_time", { message: "⏸️ HALF-TIME! Quick break!" });
 
-    io.to(matchId).emit("half_time", {
-      message: "⏸️ HALF-TIME! Quick break!",
-    });
-
-    // Reprendre après 5 secondes
     setTimeout(() => {
-      const prev = matchTimers.get(matchId);
-      if (prev) {
-        matchTimers.set(matchId, {
-          ...prev,
-          isHalfTime: false,
-          handled: false, // Remettre à false pour la prochaine question
-        });
-
-        // Redémarrer le timer si nécessaire ici, ou laisser `proceedToNextQuestion` le faire
-        proceedToNextQuestion(matchId);
-      }
-    }, 3000);
+      proceedToNextQuestion(matchId);
+    }, 5000);
   });
 
   socket.on("quiz_start", async ({ matchId }) => {
