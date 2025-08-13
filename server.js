@@ -3,7 +3,7 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const socketIo = require("socket.io");
 const http = require("http");
-
+const { AI_BOT_USER_ID } = require("./constants");
 const dotenv = require("dotenv");
 const authRoutes = require("./routers/authRoutes");
 const matchRoutes = require("./routers/matchRoutes");
@@ -246,54 +246,201 @@ io.on("connection", (socket) => {
 
   async function makeAIMove(matchId, io) {
     const match = await Match.findById(matchId);
-    if (!match || match.isFinished || !match.quizStarted) return;
+    if (
+      !match ||
+      match.isFinished ||
+      match.leaverId ||
+      !match.quizStarted ||
+      !match.isAgainstAI
+    ) {
+      return;
+    }
 
-    if (!match.isAgainstAI) return;
+    // Vérifier pause half-time
+    const timerState = matchTimers.get(matchId);
+    if (timerState?.isHalfTime) return;
 
     const lastQuestion = match.questionsAsked.at(-1);
     if (!lastQuestion) return;
 
-    // Vérifier si l'IA a déjà répondu
-    if (lastQuestion.answers.find((a) => a.playerId === "AI_BOT")) return;
+    const aiPlayerId = AI_BOT_USER_ID;
+
+    // IA a déjà répondu ?
+    if (lastQuestion.answers.some((a) => a.playerId.equals(aiPlayerId))) return;
+
+    const isGoldenPoint = timerState?.isGoldenPoint === true;
+    const isConversion = lastQuestion.question.isConversion === true;
+
+    // Conversion : vérifier si l'IA doit répondre
+    if (isConversion) {
+      const humanAnswered = lastQuestion.answers.some(
+        (a) => !a.playerId.equals(aiPlayerId)
+      );
+      const isConversionPlayer =
+        lastQuestion.question.conversionPlayerId?.equals(aiPlayerId);
+      if (humanAnswered || !isConversionPlayer) return;
+    }
 
     const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
     const willAnswerCorrectly = Math.random() < accuracy;
+    const selectedOption = willAnswerCorrectly
+      ? lastQuestion.question.correctOption
+      : Object.keys(lastQuestion.question.options)
+          .filter((opt) => opt !== lastQuestion.question.correctOption)
+          .sort(() => 0.5 - Math.random())[0];
 
-    let selectedOption;
-    if (willAnswerCorrectly) {
-      selectedOption = lastQuestion.question.correctOption;
-    } else {
-      const options = Object.keys(lastQuestion.question.options).filter(
-        (opt) => opt !== lastQuestion.question.correctOption
-      );
-      selectedOption = options[Math.floor(Math.random() * options.length)];
-    }
+    // Vérifier half-time juste avant de répondre
+    const delay =
+      match.aiSettings?.responseDelayMs ?? (isGoldenPoint ? 6000 : 8000);
+    await new Promise((resolve) => setTimeout(resolve, delay));
 
-    // Simuler un délai d'attente (ex : 2s)
-    await new Promise((resolve) =>
-      setTimeout(resolve, match.aiSettings?.responseDelayMs ?? 2000)
-    );
+    if (matchTimers.get(matchId)?.isHalfTime) return;
 
-    // Ajouter la réponse IA
-    lastQuestion.answers.push({
-      playerId: "AI_BOT",
+    const updatedMatch = await Match.findById(matchId);
+    if (!updatedMatch) return;
+
+    const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
+    if (!lastQuestionUpdated) return;
+
+    const isCorrect =
+      selectedOption === lastQuestionUpdated.question.correctOption;
+    const score = isCorrect ? (isConversion ? 2 : isGoldenPoint ? 1 : 4) : 0;
+
+    lastQuestionUpdated.answers.push({
+      playerId: aiPlayerId,
       selectedOption,
-      isCorrect: selectedOption === lastQuestion.question.correctOption,
-      score: selectedOption === lastQuestion.question.correctOption ? 4 : 0,
+      isCorrect,
+      score,
       answeredAt: new Date(),
     });
 
-    await match.save();
+    await updatedMatch.save();
 
-    // Émettre l'événement à tous dans la salle
     io.to(matchId).emit("answer_question", {
       matchId,
-      playerId: "AI_BOT",
-      questionText: lastQuestion.question.text,
+      playerId: aiPlayerId,
+      questionText: lastQuestionUpdated.question.text,
       selectedOption,
-      isCorrect: selectedOption === lastQuestion.question.correctOption,
+      isCorrect,
       answeredAt: new Date(),
     });
+
+    const freshMatch = await Match.findById(matchId)
+      .populate("creatorId")
+      .populate("joinerId");
+
+    let scoreUserOne = 0;
+    let scoreUserTwo = 0;
+    freshMatch.questionsAsked.forEach((q) => {
+      q.answers.forEach((a) => {
+        if (a.playerId.equals(freshMatch.creatorId._id)) {
+          scoreUserOne += a.score || 0;
+        } else if (
+          freshMatch.joinerId &&
+          a.playerId.equals(freshMatch.joinerId._id)
+        ) {
+          scoreUserTwo += a.score || 0;
+        }
+      });
+    });
+
+    io.to(matchId).emit("score_updated", {
+      matchId,
+      scoreUserOne,
+      scoreUserTwo,
+    });
+
+    // Cas GOLDEN POINT gagné
+    if (isGoldenPoint && isCorrect) {
+      io.to(matchId).emit("golden_point_winner", {
+        winnerId: aiPlayerId,
+        message: "🏆 GOLDEN POINT! The AI answered correctly!",
+        scoreUserOne,
+        scoreUserTwo,
+      });
+
+      clearTimeout(matchTimers.get(matchId)?.timer);
+      matchTimers.set(matchId, {
+        ...matchTimers.get(matchId),
+        handled: true,
+      });
+
+      await Match.findByIdAndUpdate(matchId, { isFinished: true });
+      return;
+    }
+
+    // Cas CONVERSION
+    if (isConversion) {
+      const teamTitle =
+        aiPlayerId.toString() === match.creatorId._id.toString()
+          ? match.playerOneTeam.title
+          : match.playerTwoTeam?.title || "Team";
+
+      io.to(matchId).emit("conversion_result", {
+        playerId: aiPlayerId,
+        success: isCorrect,
+        message: isCorrect
+          ? `${teamTitle} CONVERSION SUCCESSFUL`
+          : `${teamTitle} CONVERSION UNSUCCESSFUL`,
+      });
+
+      // Attendre puis passer à la prochaine question
+      setTimeout(async () => {
+        if (matchTimers.get(matchId)?.isHalfTime) return;
+
+        const updatedMatch2 = await Match.findById(matchId);
+        const nextIndex = updatedMatch2.questionsAsked.length;
+
+        if (nextIndex >= Quizz.length) {
+          updatedMatch2.isFinished = true;
+          await updatedMatch2.save();
+          io.to(matchId).emit("match_finished", {
+            message: "The quiz is over! Thank you for playing.",
+          });
+          io.in(matchId).socketsLeave(matchId);
+          return;
+        }
+
+        const nextQ = Quizz[nextIndex];
+        const formattedOptions = Array.isArray(nextQ.choices)
+          ? nextQ.choices.reduce((acc, choice, idx) => {
+              const letters = ["A", "B", "C", "D"];
+              acc[letters[idx]] = choice;
+              return acc;
+            }, {})
+          : nextQ.choices;
+
+        updatedMatch2.questionsAsked.push({
+          question: {
+            text: nextQ.question,
+            options: formattedOptions,
+            correctOption: nextQ.correctAnswer,
+            isConversion: nextQ.isConversion || false,
+          },
+          answers: [],
+        });
+
+        await updatedMatch2.save();
+
+        io.to(matchId).emit("next_question", {
+          question: {
+            text: nextQ.question,
+            choices: formattedOptions,
+            correctAnswer: nextQ.correctAnswer,
+          },
+        });
+
+        if (match.isAgainstAI) {
+          setTimeout(() => {
+            if (!matchTimers.get(matchId)?.isHalfTime) {
+              makeAIMove(matchId, io);
+            }
+          }, 1000);
+        }
+      }, 1000);
+
+      return;
+    }
   }
 
   socket.on("join_match_room", (matchId, callback) => {
@@ -572,7 +719,7 @@ io.on("connection", (socket) => {
       if (isGoldenPoint && !isHandled) {
         if (isCorrect) {
           lastQuestion.answers.push({
-            playerId: userId,
+            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
             selectedOption,
             isCorrect,
             score: 1,
@@ -633,7 +780,7 @@ io.on("connection", (socket) => {
           return;
         } else {
           lastQuestion.answers.push({
-            playerId: userId,
+            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
             selectedOption,
             isCorrect: false,
             score: 0,
@@ -642,7 +789,7 @@ io.on("connection", (socket) => {
           await match.save();
 
           io.to(matchId).emit("wrong_golden_point_answer", {
-            playerId: userId,
+            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
             message: "❌ Wrong answer during GOLDEN POINT",
           });
 
@@ -670,7 +817,7 @@ io.on("connection", (socket) => {
       const scoreToAdd = isCorrect ? (isConversion ? 2 : 4) : 0;
 
       lastQuestion.answers.push({
-        playerId: userId,
+        playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
         selectedOption,
         isCorrect,
         score: scoreToAdd,
@@ -694,7 +841,7 @@ io.on("connection", (socket) => {
 
       io.to(matchId).emit("answer_question", {
         matchId,
-        playerId: userId,
+        playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
         questionText: lastQuestion.question.text,
         selectedOption,
         isCorrect,
@@ -744,12 +891,12 @@ io.on("connection", (socket) => {
       // ----- Gestion Conversion -----
       if (isConversion && isConversionPlayer) {
         const teamTitle =
-          userId.toString() === match.creatorId.toString()
+          userId.toString() === match.creatorId._id.toString()
             ? match.playerOneTeam.title
             : match.playerTwoTeam?.title || "Team";
 
         io.to(matchId).emit("conversion_result", {
-          playerId: userId,
+          playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
           success: isCorrect,
           message: isCorrect
             ? `${teamTitle} CONVERSION SUCCESSFUL`
@@ -812,7 +959,7 @@ io.on("connection", (socket) => {
             : match.playerTwoTeam?.title || "Team";
 
         io.to(matchId).emit("correct_answer_received", {
-          playerId: userId,
+          playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
           message: `Try ${teamTitle} !`,
         });
 
@@ -845,7 +992,7 @@ io.on("connection", (socket) => {
           });
 
           io.to(matchId).emit("conversion_question", {
-            playerId: userId,
+            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
             question: {
               text: convQ.question,
               choices: formattedConvOptions,
