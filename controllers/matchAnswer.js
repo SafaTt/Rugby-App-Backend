@@ -3,6 +3,30 @@ const Match = require("../models/Match");
 const Quizz = require("../models/Quizz");
 const matchTimers = new Map();
 
+function isAI(id) {
+  return id && AI_BOT_USER_ID && id.toString() === AI_BOT_USER_ID.toString();
+}
+
+function recalcScores(match) {
+  let scoreUserOne = 0;
+  let scoreUserTwo = 0;
+
+  match.questionsAsked.forEach((q) => {
+    q.answers.forEach((a) => {
+      if (!match.creatorId || !match.joinerId) return;
+
+      if (a.playerId.toString() === match.creatorId._id.toString()) {
+        scoreUserOne += a.score;
+      } else if (a.playerId.toString() === match.joinerId._id.toString()) {
+        scoreUserTwo += a.score;
+      }
+    });
+  });
+
+  match.scoreUserOne = scoreUserOne;
+  match.scoreUserTwo = scoreUserTwo;
+}
+
 function getOrInitTimerState(matchId) {
   let state = matchTimers.get(matchId);
   if (!state) {
@@ -96,6 +120,8 @@ async function makeAIMove(matchId, io) {
       updatedMatch.scoreUserTwo += score;
     }
 
+    recalcScores(updatedMatch);
+
     await updatedMatch.save();
 
     io.to(matchId).emit("answer_question", {
@@ -148,9 +174,6 @@ async function makeAIMove(matchId, io) {
     }
   }, delay);
 }
-function isAI(id) {
-  return id && AI_BOT_USER_ID && id.toString() === AI_BOT_USER_ID.toString();
-}
 
 async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
   try {
@@ -187,14 +210,7 @@ async function handleAnswerQuestion({ matchId, userId, selectedOption, io }) {
     if (!match.scoreUserOne) match.scoreUserOne = 0;
     if (!match.scoreUserTwo) match.scoreUserTwo = 0;
 
-    if (responderId.toString() === match.creatorId._id.toString()) {
-      match.scoreUserOne += addScore;
-    } else if (
-      match.joinerId &&
-      responderId.toString() === match.joinerId._id.toString()
-    ) {
-      match.scoreUserTwo += addScore;
-    }
+    recalcScores(match);
 
     await match.save();
 
@@ -277,6 +293,34 @@ const proceedToNextQuestion = async (matchId, io, options = {}) => {
   if (!match || match.isFinished || !match.quizStarted) return;
 
   const timerState = matchTimers.get(matchId) || {};
+  const stateNow = getOrInitTimerState(matchId);
+  const totalQuestionsBeforeHalfTime = Math.ceil(Quizz.length / 2);
+
+  // Déclencher half-time automatiquement après la moitié des questions
+  if (
+    !stateNow.halfTimeTriggered &&
+    match.questionsAsked.length >= totalQuestionsBeforeHalfTime
+  ) {
+    stateNow.isHalfTime = true;
+    stateNow.halfTimeTriggered = true;
+    if (stateNow.timer) clearTimeout(stateNow.timer);
+    matchTimers.set(matchId, stateNow);
+
+    io.to(matchId).emit("half_time", {
+      message: "⏸️ Half-time! Take a short break.",
+    });
+
+    // pause 5 secondes avant la prochaine question
+    setTimeout(async () => {
+      const updatedState = matchTimers.get(matchId) || {};
+      updatedState.isHalfTime = false; // reprendre le quiz
+      matchTimers.set(matchId, updatedState);
+      await proceedToNextQuestion(matchId, io, { afterHalfTime: true });
+    }, 5000);
+
+    return; // arrêter ici le lancement de la question actuelle
+  }
+
   let justInjectedConversion = false;
 
   // Bloquer si golden point actif
