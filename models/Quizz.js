@@ -2554,7 +2554,7 @@ const Quizz = [
     correctAnswer: "C",
   },
   {
-    question: "Which club won the 1971 grand final?",
+    question: "Which club won the 1971 grand finaazza azl?",
     choices: {
       A: "St George",
       B: "Canterbury",

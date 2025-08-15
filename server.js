@@ -515,101 +515,6 @@ io.on("connection", (socket) => {
       if (alreadyAnswered) return;
 
       const isCorrect = selectedOption === lastQuestion.question.correctOption;
-
-      // ----- Gestion Golden Point -----
-      if (isGoldenPoint && !isHandled) {
-        if (isCorrect) {
-          lastQuestion.answers.push({
-            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
-            selectedOption,
-            isCorrect,
-            score: 1,
-            answeredAt: new Date(),
-          });
-          await match.save();
-
-          let scoreUserOne = 0,
-            scoreUserTwo = 0;
-          match.questionsAsked.forEach((q) => {
-            q.answers.forEach((a) => {
-              if (a.playerId.toString() === match.creatorId._id.toString())
-                scoreUserOne += a.score || 0;
-              else if (
-                match.joinerId &&
-                a.playerId.toString() === match.joinerId._id.toString()
-              )
-                scoreUserTwo += a.score || 0;
-            });
-          });
-
-          io.to(matchId).emit("golden_point_winner", {
-            winnerId: userId,
-            message: "🏆 GOLDEN POINT! The player answered correctly!",
-            scoreUserOne,
-            scoreUserTwo,
-          });
-
-          io.to(matchId).emit("score_updated", {
-            matchId,
-            scoreUserOne,
-            scoreUserTwo,
-          });
-
-          // 🔹 Appel à updateScores
-          await updateScores(
-            matchId,
-            match.creatorId._id.toString(),
-            scoreUserOne
-          );
-          if (match.joinerId) {
-            await updateScores(
-              matchId,
-              match.joinerId._id.toString(),
-              scoreUserTwo
-            );
-          }
-
-          clearTimeout(timerState.timer);
-
-          matchTimers.set(matchId, { ...timerState, handled: true });
-
-          await Match.findByIdAndUpdate(matchId, {
-            isFinished: true,
-            status: "finished",
-          });
-
-          return;
-        } else {
-          lastQuestion.answers.push({
-            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
-            selectedOption,
-            isCorrect: false,
-            score: 0,
-            answeredAt: new Date(),
-          });
-          await match.save();
-
-          io.to(matchId).emit("wrong_golden_point_answer", {
-            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
-            message: "❌ Wrong answer during GOLDEN POINT",
-          });
-
-          const totalAnswers = lastQuestion.answers.length;
-          const playersCount = match.joinerId ? 2 : 1;
-          const allAnswered = totalAnswers >= playersCount;
-          const allIncorrect = lastQuestion.answers.every((a) => !a.isCorrect);
-
-          if (allAnswered && allIncorrect) {
-            matchTimers.set(matchId, { ...timerState, handled: true });
-            await launchGoldenPointQuestion(matchId);
-            return;
-          }
-
-          return;
-        }
-      }
-
-      // ----- Partie normale hors Golden Point -----
       const isConversion = lastQuestion.question.isConversion === true;
       const isConversionPlayer =
         isConversion &&
@@ -617,6 +522,7 @@ io.on("connection", (socket) => {
           userId.toString();
       const scoreToAdd = isCorrect ? (isConversion ? 2 : 4) : 0;
 
+      // ----- Ajouter la réponse et sauvegarder immédiatement -----
       lastQuestion.answers.push({
         playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
         selectedOption,
@@ -627,12 +533,13 @@ io.on("connection", (socket) => {
 
       await match.save();
 
-      const totalAnswers = lastQuestion.answers.length;
+      // ----- Mettre à jour handled si tous les joueurs ont répondu -----
       const playersCount = match.joinerId ? 2 : 1;
-      if (totalAnswers >= playersCount) {
+      if (lastQuestion.answers.length >= playersCount) {
         matchTimers.set(matchId, { ...timerState, handled: true });
       }
 
+      // ----- Envoyer la réponse au joueur -----
       io.to(matchId).emit("answer_question", {
         matchId,
         playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
@@ -642,7 +549,7 @@ io.on("connection", (socket) => {
         answeredAt: new Date(),
       });
 
-      // 🔹 Recalcul des scores et mise à jour avec updateScores
+      // ----- Recalcul des scores et updateScores -----
       const freshMatch = await Match.findById(matchId)
         .populate("creatorId")
         .populate("joinerId");
@@ -682,6 +589,41 @@ io.on("connection", (socket) => {
         );
       }
 
+      // ----- Gestion Golden Point -----
+      if (isGoldenPoint && !isHandled) {
+        if (isCorrect) {
+          // ✅ Score déjà ajouté ci-dessus
+          io.to(matchId).emit("golden_point_winner", {
+            winnerId: userId,
+            message: "🏆 GOLDEN POINT! The player answered correctly!",
+            scoreUserOne,
+            scoreUserTwo,
+          });
+
+          clearTimeout(timerState.timer);
+
+          matchTimers.set(matchId, { ...timerState, handled: true });
+
+          await Match.findByIdAndUpdate(matchId, {
+            isFinished: true,
+            status: "finished",
+          });
+          return;
+        } else {
+          io.to(matchId).emit("wrong_golden_point_answer", {
+            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
+            message: "❌ Wrong answer during GOLDEN POINT",
+          });
+
+          const allIncorrect = lastQuestion.answers.every((a) => !a.isCorrect);
+          if (lastQuestion.answers.length >= playersCount && allIncorrect) {
+            matchTimers.set(matchId, { ...timerState, handled: true });
+            await launchGoldenPointQuestion(matchId);
+          }
+          return;
+        }
+      }
+
       // ----- Gestion Conversion -----
       if (isConversion && isConversionPlayer) {
         const teamTitle =
@@ -697,24 +639,66 @@ io.on("connection", (socket) => {
             : `${teamTitle} CONVERSION UNSUCCESSFUL`,
         });
 
-        // Annuler le timer de conversion si existant
-        if (timerState.conversionTimeout) {
-          clearTimeout(timerState.conversionTimeout);
-          delete timerState.conversionTimeout;
+        // 🔹 Attendre 1s puis passer à la question suivante, timer unique
+        if (!timerState.conversionTimeout) {
+          const timeout = setTimeout(async () => {
+            const updatedMatch = await Match.findById(matchId);
+            const nextIndex = updatedMatch.questionsAsked.length;
+
+            if (nextIndex >= Quizz.length) {
+              updatedMatch.isFinished = true;
+              updatedMatch.status = "finished";
+              await updatedMatch.save();
+              io.to(matchId).emit("match_finished", {
+                message: "The quiz is over! Thank you for playing.",
+              });
+              io.in(matchId).socketsLeave(matchId);
+              return;
+            }
+
+            const nextQ = Quizz[nextIndex];
+            const formattedOptions = Array.isArray(nextQ.choices)
+              ? nextQ.choices.reduce((acc, choice, idx) => {
+                  const letters = ["A", "B", "C", "D"];
+                  acc[letters[idx]] = choice;
+                  return acc;
+                }, {})
+              : nextQ.choices;
+
+            updatedMatch.questionsAsked.push({
+              question: {
+                text: nextQ.question,
+                options: formattedOptions,
+                correctOption: nextQ.correctAnswer,
+                isConversion: nextQ.isConversion || false,
+              },
+              answers: [],
+            });
+
+            await updatedMatch.save();
+
+            io.to(matchId).emit("next_question", {
+              question: {
+                text: nextQ.question,
+                choices: formattedOptions,
+                correctAnswer: nextQ.correctAnswer,
+              },
+            });
+
+            const currentState = matchTimers.get(matchId) || {};
+            delete currentState.conversionTimeout;
+            matchTimers.set(matchId, currentState);
+          }, 1000);
+
+          matchTimers.set(matchId, {
+            ...timerState,
+            conversionTimeout: timeout,
+          });
         }
-
-        matchTimers.set(matchId, {
-          ...timerState,
-          handled: true,
-          pendingConversion: null,
-        });
-
-        // Passer directement à la prochaine question
-        await proceedToNextQuestion(matchId);
         return;
       }
 
-      // ----- Gestion des réponses normales et conversion pending -----
+      // ----- Réponse normale et déclenchement Conversion pending -----
       if (isCorrect && !isConversion) {
         const teamTitle =
           userId.toString() === match.creatorId._id.toString()
@@ -726,93 +710,60 @@ io.on("connection", (socket) => {
           message: `Try ${teamTitle} !`,
         });
 
-        setTimeout(async () => {
-          const convQ =
-            Quizz.find((q) => q.isConversion) ||
-            Quizz[Math.floor(Math.random() * Quizz.length)];
+        if (!timerState.conversionTimeout) {
+          setTimeout(async () => {
+            const convQ =
+              Quizz.find((q) => q.isConversion) ||
+              Quizz[Math.floor(Math.random() * Quizz.length)];
 
-          const formattedConvOptions = Array.isArray(convQ.choices)
-            ? convQ.choices.reduce((acc, choice, idx) => {
-                const letters = ["A", "B", "C", "D"];
-                acc[letters[idx]] = choice;
-                return acc;
-              }, {})
-            : convQ.choices;
+            const formattedConvOptions = Array.isArray(convQ.choices)
+              ? convQ.choices.reduce((acc, choice, idx) => {
+                  const letters = ["A", "B", "C", "D"];
+                  acc[letters[idx]] = choice;
+                  return acc;
+                }, {})
+              : convQ.choices;
 
-          matchTimers.set(matchId, {
-            ...timerState,
-            pendingConversion: {
+            matchTimers.set(matchId, {
+              ...timerState,
+              pendingConversion: {
+                question: {
+                  text: convQ.question,
+                  options: formattedConvOptions,
+                  correctOption: convQ.correctAnswer,
+                  isConversion: true,
+                  conversionPlayerId: userId,
+                },
+                answers: [],
+              },
+              handled: false,
+            });
+
+            io.to(matchId).emit("conversion_question", {
+              playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
               question: {
                 text: convQ.question,
-                options: formattedConvOptions,
-                correctOption: convQ.correctAnswer,
-                isConversion: true,
-                conversionPlayerId: userId,
+                choices: formattedConvOptions,
+                correctAnswer: convQ.correctAnswer,
               },
-              answers: [],
-            },
-            handled: false,
-          });
-
-          io.to(matchId).emit("conversion_question", {
-            playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
-            question: {
-              text: convQ.question,
-              choices: formattedConvOptions,
-              correctAnswer: convQ.correctAnswer,
-            },
-          });
-        }, 1000);
+            });
+          }, 1000);
+        }
 
         return;
       }
 
-      // ----- Lancer prochaine question selon logique existante -----
-      if (totalAnswers >= 1) {
-        if (isConversion) {
-          if (!timerState.conversionTimeout) {
-            const timeout = setTimeout(() => {
-              proceedToNextQuestion(matchId);
-              const currentState = matchTimers.get(matchId) || {};
-              delete currentState.conversionTimeout;
-              matchTimers.set(matchId, currentState);
-            }, 10000);
+      // ----- Prochaine question normale si pas de conversion -----
+      if (!isConversion) {
+        if (!timerState.timer) {
+          const timeout = setTimeout(() => {
+            proceedToNextQuestion(matchId);
+            const currentState = matchTimers.get(matchId) || {};
+            delete currentState.timer;
+            matchTimers.set(matchId, currentState);
+          }, 1000);
 
-            matchTimers.set(matchId, {
-              ...timerState,
-              conversionTimeout: timeout,
-            });
-          }
-        } else {
-          const totalIncorrectAnswers = lastQuestion.answers.filter(
-            (a) => !a.isCorrect
-          ).length;
-
-          if (playersCount === 2) {
-            if (totalIncorrectAnswers === 1 && totalAnswers < playersCount) {
-              if (!timerState.waitingSecondPlayerTimeout) {
-                const timeout = setTimeout(() => {
-                  proceedToNextQuestion(matchId);
-                  const currentState = matchTimers.get(matchId) || {};
-                  delete currentState.waitingSecondPlayerTimeout;
-                  matchTimers.set(matchId, currentState);
-                }, 10000);
-
-                matchTimers.set(matchId, {
-                  ...timerState,
-                  waitingSecondPlayerTimeout: timeout,
-                });
-              }
-            } else {
-              setTimeout(() => {
-                proceedToNextQuestion(matchId);
-              }, 1000);
-            }
-          } else {
-            setTimeout(() => {
-              proceedToNextQuestion(matchId);
-            }, 1000);
-          }
+          matchTimers.set(matchId, { ...timerState, timer: timeout });
         }
       }
     } catch (error) {
