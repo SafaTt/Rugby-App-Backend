@@ -385,6 +385,19 @@ const proceedToNextQuestion = async (matchId, io, options = {}) => {
 
   const stateNow = getOrInitTimerState(matchId);
 
+  if (stateNow.justFinishedHalfTime && !options.afterHalfTime) {
+    // On marque qu'on a déjà respecté la pause
+    stateNow.justFinishedHalfTime = false;
+    matchTimers.set(matchId, stateNow);
+
+    // Pause de 3 secondes
+    setTimeout(() => {
+      proceedToNextQuestion(matchId, io, { afterHalfTime: true });
+    }, 2000);
+
+    return;
+  }
+
   // ⚡ Half-time automatique
   const totalQuestionsBeforeHalfTime = Math.ceil(Quizz.length / 2);
   if (
