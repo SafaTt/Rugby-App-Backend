@@ -148,8 +148,6 @@ async function makeAIMove(matchId, io) {
     }
   }, delay);
 }
-
-// Vérifie si un ID est celui de l'IA
 function isAI(id) {
   return id && AI_BOT_USER_ID && id.toString() === AI_BOT_USER_ID.toString();
 }

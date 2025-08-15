@@ -1065,12 +1065,21 @@ io.on("connection", (socket) => {
     await match.save();
 
     const timerState = matchTimers.get(matchId) || {};
-    if (timerState?.timer) clearTimeout(timerState.timer);
 
-    // Ajouter un flag pour gérer la prochaine question
+    // Nettoyer tous les timers actifs
+    if (timerState.timer) clearTimeout(timerState.timer);
+    if (timerState.conversionTimeout)
+      clearTimeout(timerState.conversionTimeout);
+    if (timerState.waitingSecondPlayerTimeout)
+      clearTimeout(timerState.waitingSecondPlayerTimeout);
+
     matchTimers.set(matchId, {
       ...timerState,
       halfTimeNextQuestionSent: false,
+      conversionTimeout: null,
+      waitingSecondPlayerTimeout: null,
+      pendingConversion: null,
+      handled: false,
     });
 
     io.to(matchId).emit("half_time", { message: "⏸️ HALF-TIME! Quick break!" });
