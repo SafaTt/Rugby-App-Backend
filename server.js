@@ -244,205 +244,6 @@ io.on("connection", (socket) => {
     }
   };
 
-  async function makeAIMove(matchId, io) {
-    const match = await Match.findById(matchId);
-    if (
-      !match ||
-      match.isFinished ||
-      match.leaverId ||
-      !match.quizStarted ||
-      !match.isAgainstAI
-    ) {
-      return;
-    }
-
-    // Vérifier pause half-time
-    const timerState = matchTimers.get(matchId);
-    if (timerState?.isHalfTime) return;
-
-    const lastQuestion = match.questionsAsked.at(-1);
-    if (!lastQuestion) return;
-
-    const aiPlayerId = AI_BOT_USER_ID;
-
-    // IA a déjà répondu ?
-    if (lastQuestion.answers.some((a) => a.playerId.equals(aiPlayerId))) return;
-
-    const isGoldenPoint = timerState?.isGoldenPoint === true;
-    const isConversion = lastQuestion.question.isConversion === true;
-
-    // Conversion : vérifier si l'IA doit répondre
-    if (isConversion) {
-      const humanAnswered = lastQuestion.answers.some(
-        (a) => !a.playerId.equals(aiPlayerId)
-      );
-      const isConversionPlayer =
-        lastQuestion.question.conversionPlayerId?.equals(aiPlayerId);
-      if (humanAnswered || !isConversionPlayer) return;
-    }
-
-    const accuracy = match.aiSettings?.accuracyRate ?? 0.7;
-    const willAnswerCorrectly = Math.random() < accuracy;
-    const selectedOption = willAnswerCorrectly
-      ? lastQuestion.question.correctOption
-      : Object.keys(lastQuestion.question.options)
-          .filter((opt) => opt !== lastQuestion.question.correctOption)
-          .sort(() => 0.5 - Math.random())[0];
-
-    // Vérifier half-time juste avant de répondre
-    const delay =
-      match.aiSettings?.responseDelayMs ?? (isGoldenPoint ? 6000 : 8000);
-    await new Promise((resolve) => setTimeout(resolve, delay));
-
-    if (matchTimers.get(matchId)?.isHalfTime) return;
-
-    const updatedMatch = await Match.findById(matchId);
-    if (!updatedMatch) return;
-
-    const lastQuestionUpdated = updatedMatch.questionsAsked.at(-1);
-    if (!lastQuestionUpdated) return;
-
-    const isCorrect =
-      selectedOption === lastQuestionUpdated.question.correctOption;
-    const score = isCorrect ? (isConversion ? 2 : isGoldenPoint ? 1 : 4) : 0;
-
-    lastQuestionUpdated.answers.push({
-      playerId: aiPlayerId,
-      selectedOption,
-      isCorrect,
-      score,
-      answeredAt: new Date(),
-    });
-
-    await updatedMatch.save();
-
-    io.to(matchId).emit("answer_question", {
-      matchId,
-      playerId: aiPlayerId,
-      questionText: lastQuestionUpdated.question.text,
-      selectedOption,
-      isCorrect,
-      answeredAt: new Date(),
-    });
-
-    const freshMatch = await Match.findById(matchId)
-      .populate("creatorId")
-      .populate("joinerId");
-
-    let scoreUserOne = 0;
-    let scoreUserTwo = 0;
-    freshMatch.questionsAsked.forEach((q) => {
-      q.answers.forEach((a) => {
-        if (a.playerId.equals(freshMatch.creatorId._id)) {
-          scoreUserOne += a.score || 0;
-        } else if (
-          freshMatch.joinerId &&
-          a.playerId.equals(freshMatch.joinerId._id)
-        ) {
-          scoreUserTwo += a.score || 0;
-        }
-      });
-    });
-
-    io.to(matchId).emit("score_updated", {
-      matchId,
-      scoreUserOne,
-      scoreUserTwo,
-    });
-
-    // Cas GOLDEN POINT gagné
-    if (isGoldenPoint && isCorrect) {
-      io.to(matchId).emit("golden_point_winner", {
-        winnerId: aiPlayerId,
-        message: "🏆 GOLDEN POINT! The AI answered correctly!",
-        scoreUserOne,
-        scoreUserTwo,
-      });
-
-      clearTimeout(matchTimers.get(matchId)?.timer);
-      matchTimers.set(matchId, {
-        ...matchTimers.get(matchId),
-        handled: true,
-      });
-
-      await Match.findByIdAndUpdate(matchId, { isFinished: true });
-      return;
-    }
-
-    // Cas CONVERSION
-    if (isConversion) {
-      const teamTitle =
-        aiPlayerId.toString() === match.creatorId._id.toString()
-          ? match.playerOneTeam.title
-          : match.playerTwoTeam?.title || "Team";
-
-      io.to(matchId).emit("conversion_result", {
-        playerId: aiPlayerId,
-        success: isCorrect,
-        message: isCorrect
-          ? `${teamTitle} CONVERSION SUCCESSFUL`
-          : `${teamTitle} CONVERSION UNSUCCESSFUL`,
-      });
-
-      // Attendre puis passer à la prochaine question
-      setTimeout(async () => {
-        if (matchTimers.get(matchId)?.isHalfTime) return;
-
-        const updatedMatch2 = await Match.findById(matchId);
-        const nextIndex = updatedMatch2.questionsAsked.length;
-
-        if (nextIndex >= Quizz.length) {
-          updatedMatch2.isFinished = true;
-          await updatedMatch2.save();
-          io.to(matchId).emit("match_finished", {
-            message: "The quiz is over! Thank you for playing.",
-          });
-          io.in(matchId).socketsLeave(matchId);
-          return;
-        }
-
-        const nextQ = Quizz[nextIndex];
-        const formattedOptions = Array.isArray(nextQ.choices)
-          ? nextQ.choices.reduce((acc, choice, idx) => {
-              const letters = ["A", "B", "C", "D"];
-              acc[letters[idx]] = choice;
-              return acc;
-            }, {})
-          : nextQ.choices;
-
-        updatedMatch2.questionsAsked.push({
-          question: {
-            text: nextQ.question,
-            options: formattedOptions,
-            correctOption: nextQ.correctAnswer,
-            isConversion: nextQ.isConversion || false,
-          },
-          answers: [],
-        });
-
-        await updatedMatch2.save();
-
-        io.to(matchId).emit("next_question", {
-          question: {
-            text: nextQ.question,
-            choices: formattedOptions,
-            correctAnswer: nextQ.correctAnswer,
-          },
-        });
-
-        if (match.isAgainstAI) {
-          setTimeout(() => {
-            if (!matchTimers.get(matchId)?.isHalfTime) {
-              makeAIMove(matchId, io);
-            }
-          }, 1000);
-        }
-      }, 1000);
-
-      return;
-    }
-  }
-
   socket.on("join_match_room", (matchId, callback) => {
     socket.join(matchId);
     if (callback) callback();
@@ -826,13 +627,6 @@ io.on("connection", (socket) => {
 
       await match.save();
 
-      if (
-        match.isAgainstAI &&
-        userId.toString() === match.creatorId._id.toString()
-      ) {
-        await makeAIMove(matchId, io);
-      }
-
       const totalAnswers = lastQuestion.answers.length;
       const playersCount = match.joinerId ? 2 : 1;
       if (totalAnswers >= playersCount) {
@@ -903,51 +697,20 @@ io.on("connection", (socket) => {
             : `${teamTitle} CONVERSION UNSUCCESSFUL`,
         });
 
-        setTimeout(async () => {
-          const updatedMatch = await Match.findById(matchId);
-          const nextIndex = updatedMatch.questionsAsked.length;
+        // Annuler le timer de conversion si existant
+        if (timerState.conversionTimeout) {
+          clearTimeout(timerState.conversionTimeout);
+          delete timerState.conversionTimeout;
+        }
 
-          if (nextIndex >= Quizz.length) {
-            updatedMatch.isFinished = true;
-            updatedMatch.status = "finished";
-            await updatedMatch.save();
-            io.to(matchId).emit("match_finished", {
-              message: "The quiz is over! Thank you for playing.",
-            });
-            io.in(matchId).socketsLeave(matchId);
-            return;
-          }
+        matchTimers.set(matchId, {
+          ...timerState,
+          handled: true,
+          pendingConversion: null,
+        });
 
-          const nextQ = Quizz[nextIndex];
-          const formattedOptions = Array.isArray(nextQ.choices)
-            ? nextQ.choices.reduce((acc, choice, idx) => {
-                const letters = ["A", "B", "C", "D"];
-                acc[letters[idx]] = choice;
-                return acc;
-              }, {})
-            : nextQ.choices;
-
-          updatedMatch.questionsAsked.push({
-            question: {
-              text: nextQ.question,
-              options: formattedOptions,
-              correctOption: nextQ.correctAnswer,
-              isConversion: nextQ.isConversion || false,
-            },
-            answers: [],
-          });
-
-          await updatedMatch.save();
-
-          io.to(matchId).emit("next_question", {
-            question: {
-              text: nextQ.question,
-              choices: formattedOptions,
-              correctAnswer: nextQ.correctAnswer,
-            },
-          });
-        }, 9000);
-
+        // Passer directement à la prochaine question
+        await proceedToNextQuestion(matchId);
         return;
       }
 

@@ -7,6 +7,35 @@ function isAI(id) {
   return id && AI_BOT_USER_ID && id.toString() === AI_BOT_USER_ID.toString();
 }
 
+const cleanupMatch = async (matchId, io) => {
+  const state = matchTimers.get(matchId);
+
+  // Supprimer tous les timers actifs
+  if (state?.timer) {
+    clearTimeout(state.timer);
+  }
+  if (state?.conversionTimeout) {
+    clearTimeout(state.conversionTimeout);
+  }
+
+  // Supprimer l'état du match
+  matchTimers.delete(matchId);
+
+  // Mettre à jour la base si besoin
+  const match = await Match.findById(matchId);
+  if (match && !match.isFinished) {
+    match.isFinished = true;
+    match.status = "finished";
+    await match.save();
+  }
+
+  // Informer les clients et retirer tous les sockets de la room
+  io.to(matchId).emit("match_finished", { matchId });
+  io.in(matchId).socketsLeave(matchId);
+
+  console.log(`🏁 Cleanup complet pour le match ${matchId}`);
+};
+
 function recalcScores(match) {
   let scoreUserOne = 0;
   let scoreUserTwo = 0;
@@ -389,15 +418,11 @@ const proceedToNextQuestion = async (matchId, io, options = {}) => {
   // Nouvelle question normale
   const nextQ = getRandomQuestion(Quizz, match.questionsAsked);
   if (!nextQ) {
-    match.isFinished = true;
-    match.status = "finished";
-    await match.save();
-    io.to(matchId).emit("match_finished", { matchId });
-    io.in(matchId).socketsLeave(matchId);
+    await cleanupMatch(matchId, io);
+
     console.log("🏁 Fin du match, plus de questions dispo");
     return;
   }
-
   const formattedOptions = Array.isArray(nextQ.choices)
     ? nextQ.choices.reduce((acc, choice, idx) => {
         const letters = ["A", "B", "C", "D"];
