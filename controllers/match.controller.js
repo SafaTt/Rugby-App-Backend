@@ -26,14 +26,16 @@ const createMatch = async (req, res) => {
     let joinerId = null;
 
     if (isAgainstAI) {
-      playerTwoTeam = {
+      // Si le frontend a envoyé un playerTwoTeam, on l'utilise
+      playerTwoTeam = clientPlayerTwoTeam || {
         title: "AI Bot",
         color: "#888888",
         textColor: "#000000",
       };
+
       status = "in-progress";
       startTime = new Date();
-      joinerId = AI_BOT_USER_ID; // ← Assure-toi que cette constante est définie ailleurs
+      joinerId = AI_BOT_USER_ID;
     } else if (clientPlayerTwoTeam) {
       playerTwoTeam = clientPlayerTwoTeam;
       status = "in-progress";
