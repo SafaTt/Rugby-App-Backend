@@ -56,19 +56,20 @@ const updateScores = async (matchId) => {
     .populate("creatorId")
     .populate("joinerId");
 
+  if (!match) return;
+
   let scoreUserOne = 0;
   let scoreUserTwo = 0;
 
   match.questionsAsked.forEach((q) => {
     q.answers.forEach((a) => {
-      if (a.playerId.toString() === match.creatorId._id.toString()) {
-        scoreUserOne += a.score || 0;
-      } else if (
-        match.joinerId &&
-        a.playerId.toString() === match.joinerId._id.toString()
-      ) {
-        scoreUserTwo += a.score || 0;
-      }
+      const pid = a.playerId.toString();
+      const isConversion = q.question.isConversion || false;
+      const points = a.score || (a.isCorrect ? (isConversion ? 2 : 4) : 0);
+
+      if (pid === match.creatorId._id.toString()) scoreUserOne += points;
+      else if (match.joinerId && pid === match.joinerId._id.toString())
+        scoreUserTwo += points;
     });
   });
 
@@ -77,6 +78,8 @@ const updateScores = async (matchId) => {
     scoreUserOne,
     scoreUserTwo,
   });
+
+  return { scoreUserOne, scoreUserTwo };
 };
 
 async function launchGoldenPointQuestion(matchId) {
@@ -254,65 +257,55 @@ io.on("connection", (socket) => {
     const match = await Match.findById(matchId);
     if (!match || match.isFinished || !match.quizStarted) return;
 
-    const timerState = matchTimers.get(matchId) || {};
-    let justInjectedConversion = false;
+    const state = matchTimers.get(matchId) || {};
 
-    // Bloquer si golden point actif
-    if (timerState.isGoldenPoint && !timerState.handled) return;
+    // ⚡ Protection contre golden point actif
+    if (state.isGoldenPoint && !state.handled) return;
 
-    // ⚡ Bloquer l’injection multiple après half-time
-    if (options.afterHalfTime && timerState.halfTimeNextQuestionSent) return;
+    // ⚡ Protection half-time
+    if (options.afterHalfTime && state.halfTimeNextQuestionSent) return;
 
     if (options.afterHalfTime) {
-      // marquer qu'on a déjà envoyé la question du half-time
-      matchTimers.set(matchId, {
-        ...timerState,
-        halfTimeNextQuestionSent: true,
-      });
+      state.halfTimeNextQuestionSent = true;
     }
 
-    // ⚡ Si une conversion est en attente, on l’injecte et on attend 10s
-    if (timerState.pendingConversion) {
-      // Si un timer de conversion existe déjà, on ne fait rien
-      if (timerState.conversionTimeout) return;
+    // ⚡ Conversion en attente
+    if (state.pendingConversion && !state.conversionTimeout) {
+      const conv = state.pendingConversion;
 
-      const convQuestion = timerState.pendingConversion;
-      convQuestion.question.isConversion = true;
-
-      match.questionsAsked.push(convQuestion);
-      await match.save();
-      justInjectedConversion = true;
-
-      if (timerState.timer) clearTimeout(timerState.timer);
-
-      io.to(matchId).emit("conversion_question", {
-        playerId: convQuestion.question.conversionPlayerId,
+      // Crée la question conversion dans DB
+      const newConvQuestion = {
         question: {
-          text: convQuestion.question.text,
-          choices: convQuestion.question.options,
-          correctAnswer: convQuestion.question.correctOption,
+          ...conv.question,
+          isConversion: true,
+        },
+        answers: [],
+      };
+
+      match.questionsAsked.push(newConvQuestion);
+      await match.save();
+
+      // ⚡ Envoie au joueur
+      io.to(matchId).emit("conversion_question", {
+        playerId: conv.question.conversionPlayerId,
+        question: {
+          text: conv.question.text,
+          choices: conv.question.options,
+          correctAnswer: conv.question.correctOption,
         },
       });
 
-      // Timer 10s pour passer à la question suivante
-      const conversionTimeout = setTimeout(async () => {
-        const state = matchTimers.get(matchId) || {};
-        if (state?.pendingConversion) {
-          delete state.pendingConversion;
-          delete state.conversionTimeout;
-          markHandled(matchId);
-          matchTimers.set(matchId, state);
-          await proceedToNextQuestion(matchId);
-        }
+      // Supprime pendingConversion après 10s si pas répondu
+      state.conversionTimeout = setTimeout(async () => {
+        const s = matchTimers.get(matchId) || {};
+        if (s.pendingConversion) delete s.pendingConversion;
+        delete s.conversionTimeout;
+        matchTimers.set(matchId, s);
+
+        await proceedToNextQuestion(matchId);
       }, 10000);
 
-      matchTimers.set(matchId, {
-        ...timerState,
-        conversionTimeout,
-        handled: false,
-      });
-
-      console.log("⏳ Conversion injectée, timer 10s lancé");
+      matchTimers.set(matchId, state);
       return;
     }
 
@@ -324,10 +317,10 @@ io.on("connection", (socket) => {
       await match.save();
       io.to(matchId).emit("match_finished", { matchId });
       io.in(matchId).socketsLeave(matchId);
-      console.log("🏁 Fin du match, plus de questions dispo");
       return;
     }
 
+    // Préparer la question
     const formattedOptions = Array.isArray(nextQ.choices)
       ? nextQ.choices.reduce((acc, choice, idx) => {
           const letters = ["A", "B", "C", "D"];
@@ -335,24 +328,6 @@ io.on("connection", (socket) => {
           return acc;
         }, {})
       : nextQ.choices;
-
-    const lastQuestionIndex = match.questionsAsked.length - 1;
-    const previousQuestion =
-      lastQuestionIndex >= 0 ? match.questionsAsked[lastQuestionIndex] : null;
-
-    let launchConversion = false;
-    let playerIdToConvert = null;
-
-    if (
-      previousQuestion &&
-      !justInjectedConversion &&
-      !previousQuestion.question.isConversion
-    ) {
-      if (timerState.firstCorrectPlayer) {
-        launchConversion = true;
-        playerIdToConvert = timerState.firstCorrectPlayer;
-      }
-    }
 
     const newQuestion = {
       question: {
@@ -365,54 +340,31 @@ io.on("connection", (socket) => {
       answers: [],
     };
 
-    // ⚡ Conversion immédiate si un joueur correct
-    if (launchConversion) {
-      matchTimers.set(matchId, {
-        ...timerState,
-        pendingConversion: {
-          question: {
-            ...newQuestion.question,
-            isConversion: true,
-            conversionPlayerId: playerIdToConvert,
-          },
-          answers: [],
-        },
-        handled: false,
-      });
-      return await proceedToNextQuestion(matchId); // Récursif pour injecter conversion
-    }
-
-    // Sinon on envoie question normale
     match.questionsAsked.push(newQuestion);
     await match.save();
 
-    if (timerState.timer) clearTimeout(timerState.timer);
+    // ⚡ Nettoyer timer précédent
+    if (state.timer) clearTimeout(state.timer);
 
     io.to(matchId).emit("next_question", {
       question: {
-        text: nextQ.question,
-        choices: formattedOptions,
-        correctAnswer: nextQ.correctAnswer,
+        text: newQuestion.question.text,
+        choices: newQuestion.question.options,
+        correctAnswer: newQuestion.question.correctOption,
       },
     });
 
-    console.log("🧭 Timer lancé pour une nouvelle question normale");
-
-    // Timer normal 10s pour passer à la suivante
-    const timer = setTimeout(() => {
-      const state = matchTimers.get(matchId);
-      if (!state?.handled && !state?.pendingConversion) {
+    // Timer 10s pour passer à la question suivante
+    state.timer = setTimeout(async () => {
+      const s = matchTimers.get(matchId) || {};
+      if (!s.handled && !s.pendingConversion) {
         markHandled(matchId);
-        proceedToNextQuestion(matchId);
+        await proceedToNextQuestion(matchId);
       }
     }, 10000);
 
-    matchTimers.set(matchId, {
-      timer,
-      handled: false,
-      pendingConversion: null,
-      firstCorrectPlayer: null,
-    });
+    state.handled = false;
+    matchTimers.set(matchId, state);
   };
 
   socket.on("match_joined", async (data) => {
@@ -613,6 +565,7 @@ io.on("connection", (socket) => {
       }
 
       // ----- Partie normale hors Golden Point -----
+      // ----- Partie normale hors Golden Point -----
       const isConversion = lastQuestion.question.isConversion === true;
       const isConversionPlayer =
         isConversion &&
@@ -645,44 +598,107 @@ io.on("connection", (socket) => {
         answeredAt: new Date(),
       });
 
-      // 🔹 Recalcul des scores et mise à jour avec updateScores
-      const freshMatch = await Match.findById(matchId)
-        .populate("creatorId")
-        .populate("joinerId");
+      // 🔹 Gestion Conversion (corrige updateScores pour chaque conversion)
+      if (isConversion && isConversionPlayer) {
+        const teamTitle =
+          userId.toString() === match.creatorId._id.toString()
+            ? match.playerOneTeam.title
+            : match.playerTwoTeam?.title || "Team";
 
-      let scoreUserOne = 0;
-      let scoreUserTwo = 0;
-
-      freshMatch.questionsAsked.forEach((q) => {
-        q.answers.forEach((a) => {
-          if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
-            scoreUserOne += a.score || 0;
-          } else if (
-            freshMatch.joinerId &&
-            a.playerId.toString() === freshMatch.joinerId._id.toString()
-          ) {
-            scoreUserTwo += a.score || 0;
-          }
+        io.to(matchId).emit("conversion_result", {
+          playerId: userId === "AI_BOT" ? AI_BOT_USER_ID : userId,
+          success: isCorrect,
+          message: isCorrect
+            ? `${teamTitle} CONVERSION SUCCESSFUL`
+            : `${teamTitle} CONVERSION UNSUCCESSFUL`,
         });
-      });
 
-      io.to(matchId).emit("score_updated", {
-        matchId,
-        scoreUserOne,
-        scoreUserTwo,
-      });
+        // 🔹 Recalculer et mettre à jour les scores UNE seule fois ici
+        const freshMatch = await Match.findById(matchId)
+          .populate("creatorId")
+          .populate("joinerId");
 
-      await updateScores(
-        matchId,
-        freshMatch.creatorId._id.toString(),
-        scoreUserOne
-      );
-      if (freshMatch.joinerId) {
+        let scoreUserOne = 0;
+        let scoreUserTwo = 0;
+
+        freshMatch.questionsAsked.forEach((q) => {
+          q.answers.forEach((a) => {
+            if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
+              scoreUserOne += a.score || 0;
+            } else if (
+              freshMatch.joinerId &&
+              a.playerId.toString() === freshMatch.joinerId._id.toString()
+            ) {
+              scoreUserTwo += a.score || 0;
+            }
+          });
+        });
+
+        io.to(matchId).emit("score_updated", {
+          matchId,
+          scoreUserOne,
+          scoreUserTwo,
+        });
+
         await updateScores(
           matchId,
-          freshMatch.joinerId._id.toString(),
-          scoreUserTwo
+          freshMatch.creatorId._id.toString(),
+          scoreUserOne
         );
+        if (freshMatch.joinerId) {
+          await updateScores(
+            matchId,
+            freshMatch.joinerId._id.toString(),
+            scoreUserTwo
+          );
+        }
+
+        // Lancer la prochaine question après conversion
+        setTimeout(() => proceedToNextQuestion(matchId), 1000);
+        return; // important pour éviter de recalculer score encore une fois
+      }
+
+      // ----- Pour les réponses normales (non conversion) -----
+      // Recalcul de score et updateScores ici uniquement si ce n’est pas une conversion
+      if (!isConversion) {
+        const freshMatch = await Match.findById(matchId)
+          .populate("creatorId")
+          .populate("joinerId");
+
+        let scoreUserOne = 0;
+        let scoreUserTwo = 0;
+
+        freshMatch.questionsAsked.forEach((q) => {
+          q.answers.forEach((a) => {
+            if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
+              scoreUserOne += a.score || 0;
+            } else if (
+              freshMatch.joinerId &&
+              a.playerId.toString() === freshMatch.joinerId._id.toString()
+            ) {
+              scoreUserTwo += a.score || 0;
+            }
+          });
+        });
+
+        io.to(matchId).emit("score_updated", {
+          matchId,
+          scoreUserOne,
+          scoreUserTwo,
+        });
+
+        await updateScores(
+          matchId,
+          freshMatch.creatorId._id.toString(),
+          scoreUserOne
+        );
+        if (freshMatch.joinerId) {
+          await updateScores(
+            matchId,
+            freshMatch.joinerId._id.toString(),
+            scoreUserTwo
+          );
+        }
       }
 
       // ----- Gestion Conversion -----
@@ -699,6 +715,46 @@ io.on("connection", (socket) => {
             ? `${teamTitle} CONVERSION SUCCESSFUL`
             : `${teamTitle} CONVERSION UNSUCCESSFUL`,
         });
+
+        // 🔹 Correction : recalculer et mettre à jour les scores après la conversion
+        const freshMatch = await Match.findById(matchId)
+          .populate("creatorId")
+          .populate("joinerId");
+
+        let scoreUserOne = 0;
+        let scoreUserTwo = 0;
+
+        freshMatch.questionsAsked.forEach((q) => {
+          q.answers.forEach((a) => {
+            if (a.playerId.toString() === freshMatch.creatorId._id.toString()) {
+              scoreUserOne += a.score || 0;
+            } else if (
+              freshMatch.joinerId &&
+              a.playerId.toString() === freshMatch.joinerId._id.toString()
+            ) {
+              scoreUserTwo += a.score || 0;
+            }
+          });
+        });
+
+        io.to(matchId).emit("score_updated", {
+          matchId,
+          scoreUserOne,
+          scoreUserTwo,
+        });
+
+        await updateScores(
+          matchId,
+          freshMatch.creatorId._id.toString(),
+          scoreUserOne
+        );
+        if (freshMatch.joinerId) {
+          await updateScores(
+            matchId,
+            freshMatch.joinerId._id.toString(),
+            scoreUserTwo
+          );
+        }
 
         setTimeout(async () => {
           const updatedMatch = await Match.findById(matchId);
@@ -832,6 +888,7 @@ io.on("connection", (socket) => {
           ).length;
 
           if (playersCount === 2) {
+            // Si un joueur a répondu faux et l'autre n'a pas encore répondu
             if (totalIncorrectAnswers === 1 && totalAnswers < playersCount) {
               if (!timerState.waitingSecondPlayerTimeout) {
                 const timeout = setTimeout(() => {
@@ -839,7 +896,7 @@ io.on("connection", (socket) => {
                   const currentState = matchTimers.get(matchId) || {};
                   delete currentState.waitingSecondPlayerTimeout;
                   matchTimers.set(matchId, currentState);
-                }, 10000);
+                }, 10000); // attendre jusqu'à 10s
 
                 matchTimers.set(matchId, {
                   ...timerState,
@@ -847,14 +904,12 @@ io.on("connection", (socket) => {
                 });
               }
             } else {
-              setTimeout(() => {
-                proceedToNextQuestion(matchId);
-              }, 1000);
+              // Tous les joueurs ont répondu ou aucun joueur restant
+              proceedToNextQuestion(matchId);
             }
           } else {
-            setTimeout(() => {
-              proceedToNextQuestion(matchId);
-            }, 1000);
+            // Cas joueur solo
+            proceedToNextQuestion(matchId);
           }
         }
       }
