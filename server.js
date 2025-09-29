@@ -541,6 +541,7 @@ io.on("connection", (socket) => {
       if (alreadyAnswered) return;
 
       // ----- Golden point (inchangé) -----
+      // ----- Golden point (réponse correcte) -----
       if (isGoldenPoint && !isHandled) {
         lastQuestion.answers.push({
           playerId,
@@ -550,34 +551,96 @@ io.on("connection", (socket) => {
           answeredAt: new Date(),
         });
         await match.save();
+
         if (isCorrect) {
-          await updateScores(matchId);
+          // --- 1) Recalculer les scores depuis la DB (source de vérité)
+          const freshMatch = await Match.findById(matchId)
+            .populate("creatorId")
+            .populate("joinerId");
+          let scoreUserOne = 0,
+            scoreUserTwo = 0;
+          freshMatch.questionsAsked.forEach((q) => {
+            q.answers.forEach((a) => {
+              if (a.playerId.toString() === freshMatch.creatorId._id.toString())
+                scoreUserOne += a.score || 0;
+              else if (
+                freshMatch.joinerId &&
+                a.playerId.toString() === freshMatch.joinerId._id.toString()
+              )
+                scoreUserTwo += a.score || 0;
+            });
+          });
+
+          // --- 2) Émettre le score explicitement AVANT de finir la partie
+          io.to(matchId).emit("score_updated", {
+            matchId,
+            scoreUserOne,
+            scoreUserTwo,
+          });
+
+          // --- 3) Émettre aussi golden_point_winner en fournissant les scores (utile côté UI)
           io.to(matchId).emit("golden_point_winner", {
             winnerId: userId,
             message: "🏆 GOLDEN POINT! The player answered correctly!",
+            scoreUserOne,
+            scoreUserTwo,
           });
-          timerState = safeGetState(matchId);
-          if (timerState.timer) {
-            clearTimeout(timerState.timer);
-            delete timerState.timer;
+
+          // --- 4) Appel à updateScores (si tu veux garder logique de persist / autres effets)
+          //    updateScores émet aussi score_updated ; on l'attend pour cohérence, mais on a déjà émis ci-dessus.
+          await updateScores(matchId);
+
+          // --- 5) Nettoyage timers locaux (défensif)
+          let currentState = safeGetState(matchId);
+          if (currentState.timer) {
+            clearTimeout(currentState.timer);
+            delete currentState.timer;
           }
-          timerState.handled = true;
-          safeSetState(matchId, timerState);
-          await Match.findByIdAndUpdate(matchId, {
-            isFinished: true,
-            status: "finished",
-          });
+          if (currentState.conversionTimeout) {
+            clearTimeout(currentState.conversionTimeout);
+            delete currentState.conversionTimeout;
+          }
+          if (currentState.waitingSecondPlayerTimeout) {
+            clearTimeout(currentState.waitingSecondPlayerTimeout);
+            delete currentState.waitingSecondPlayerTimeout;
+          }
+
+          // --- 6) Marquer handled & finir la partie APRÈS un petit délai pour laisser le client traiter
+          currentState.handled = true;
+          safeSetState(matchId, currentState);
+
+          // délai court non-bloquant pour laisser le client recevoir/mettre à jour l'UI
+          setTimeout(async () => {
+            await Match.findByIdAndUpdate(matchId, {
+              isFinished: true,
+              status: "finished",
+            });
+
+            // Optionnel : n'émettre match_finished que si tu veux que le client passe sur l'écran de fin
+            io.to(matchId).emit("match_finished", {
+              matchId,
+              message: "Quiz finished after golden point.",
+            });
+
+            // Ne fais socketsLeave qu'après une petite attente côté client si nécessaire.
+            // io.in(matchId).socketsLeave(matchId);
+            console.log(
+              `[golden_point] match ${matchId} finished and clients notified`
+            );
+          }, 300);
         } else {
+          // cas mauvais => comportement existant (on signale mauvaise réponse pendant golden point)
           io.to(matchId).emit("wrong_golden_point_answer", {
             playerId,
             message: "❌ Wrong answer during GOLDEN POINT",
           });
+
           const totalAnswersGP = lastQuestion.answers.length;
           const allIncorrect = lastQuestion.answers.every((a) => !a.isCorrect);
           if (totalAnswersGP >= playersCount && allIncorrect) {
-            timerState = safeGetState(matchId);
-            timerState.handled = true;
-            safeSetState(matchId, timerState);
+            let ts = safeGetState(matchId);
+            ts.handled = true;
+            safeSetState(matchId, ts);
             await launchGoldenPointQuestion(matchId);
           }
         }
